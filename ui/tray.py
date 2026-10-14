@@ -136,7 +136,7 @@ class TrayIcon:
             return
 
         # Import here to avoid circular imports
-        from opup_window import get_popup_window
+        from popup_window import get_popup_window
 
         if not hasattr(self, '_popup_window') or self._popup_window is None:
             self._popup_window = get_popup_window()
