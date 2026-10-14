@@ -276,7 +276,7 @@ void_tray/
   desktop.py           sound, fullscreen detection, editor, launcher
   gi_env.py            the GObject-introspection imports, in one place
   ui/                  mixins: feeds, live, weather, updates, timer, icon, connectivity, popup
-tests/
+tests/                 one test file per module, plus facade.py, helpers.py and run_stubbed.py
 ```
 
 Pure logic (parsers, config readers, schedule maths) lives in the top-level modules and never touches GTK; everything that builds or updates widgets is in `ui/`.
