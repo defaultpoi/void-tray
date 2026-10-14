@@ -1,0 +1,20 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-gi gir1.2-gtk-3.0 python3-gi-cairo python3-cairo python3-feedparser python3-pyflakes
+      - name: Static checks
+        run: |
+          /usr/bin/python3 -m compileall -q void_tray tests
+          /usr/bin/python3 -m py_compile void-tray
+          /usr/bin/python3 -m pyflakes void_tray tests void-tray
+      - name: Tests (real GTK)
+        run: xvfb-run -a /usr/bin/python3 -m unittest discover -s tests -v
+      - name: Tests (GTK stubbed)
+        run: /usr/bin/python3 tests/run_stubbed.py
