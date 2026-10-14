@@ -61,7 +61,7 @@ def ensure_config():
             "# https://example.com/feed.xml|My Blog|5|category=sports; author=Some Name\n"
             "\n"
             "[mute]\n"
-            "# Items whose title contains any of these phrases (case-insensitive,\n"
+            "# Items whose title contains any of these phrases (ignoring case and accents,\n"
             "# substring match) are auto-marked as read and never shown as unread.\n"
             "# One phrase per line, or several separated by | on the same line.\n"
             "# Example:\n"
@@ -194,13 +194,14 @@ def load_highlight_words():
 
 
 def load_mute_filters():
-    """Returns a list of lowercase phrases; a title is muted if it contains any of them."""
+    """Returns the phrases folded to lowercase without accents; a title is muted
+    if it contains any of them (see is_muted)."""
     phrases = []
     for line in _read_config_sections()['mute']:
         for phrase in line.split('|'):
-            phrase = phrase.strip()
+            phrase = _fold_text(phrase)
             if phrase:
-                phrases.append(phrase.lower())
+                phrases.append(phrase)
     return phrases
 
 

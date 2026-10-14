@@ -217,8 +217,11 @@ def unread_feed_terms(unread, feed_url):
 
 
 def is_muted(title, mute_phrases):
-    title_lower = title.lower()
-    return any(phrase in title_lower for phrase in mute_phrases)
+    """True when the title contains any phrase, ignoring case and accents (the
+    same folding the per-feed mute rules use). A phrase that folds to nothing
+    would match every title, so it never mutes."""
+    folded_title = _fold_text(title)
+    return any(folded and folded in folded_title for folded in map(_fold_text, mute_phrases))
 
 
 def entry_id(entry, feed_url):

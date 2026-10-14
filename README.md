@@ -100,7 +100,7 @@ https://example.com/feed.xml|My Blog|5
 https://example.com/feed.xml|My Blog|15|category=sports; author=Some Author
 
 [mute]
-# case-insensitive phrases, several per line separated by |; titles containing any are dropped
+# phrases (case and accents ignored), several per line separated by |; titles containing any are dropped
 sponsored
 
 [twitch]

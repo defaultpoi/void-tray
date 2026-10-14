@@ -33,6 +33,39 @@ class TestMute(TmpConfigCase):
         self.assertFalse(rt.is_muted('Hello', ['giveaway']))
         self.assertFalse(rt.is_muted('Hello', []))
 
+    def test_accents_in_the_title_are_ignored(self):
+        self.assertTrue(rt.is_muted('\u0218tiri sportive azi', ['stiri sportive']))
+
+    def test_accents_in_the_phrase_are_ignored(self):
+        self.assertTrue(rt.is_muted('Stiri sportive azi', ['\u0219tiri sportive']))
+
+    def test_comma_below_and_cedilla_forms_match_each_other(self):
+        # s/t with comma below (U+0219, U+021B) vs the older cedilla forms (U+015F, U+0163)
+        self.assertTrue(rt.is_muted('\u015etiri \u0163\u0103ri', ['\u0219tiri \u021b\u0103ri']))
+        self.assertTrue(rt.is_muted('\u0218tiri \u021b\u0103ri', ['\u015ftiri \u0163\u0103ri']))
+
+    def test_composed_and_decomposed_accents_match(self):
+        self.assertTrue(rt.is_muted('Caf\u00e9 news', ['cafe\u0301']))
+
+    def test_accents_do_not_cause_false_matches(self):
+        self.assertFalse(rt.is_muted('Stiri sportive', ['stiri politice']))
+        self.assertFalse(rt.is_muted('Sport', ['\u0219tiri']))
+
+    def test_a_phrase_with_nothing_left_after_folding_never_mutes(self):
+        self.assertFalse(rt.is_muted('Hello', ['\u0301']))
+        self.assertFalse(rt.is_muted('Hello', ['   ']))
+
+    def test_loader_folds_accents_and_case(self):
+        self.conf('[mute]\n\u0218tiri Sportive | CAF\u00c9\n\u0301\n')
+        self.assertEqual(rt.load_mute_filters(), ['stiri sportive', 'cafe'])
+
+    def test_configured_phrases_mute_across_accent_forms(self):
+        self.conf('[mute]\n\u0219tiri sportive\n')
+        phrases = rt.load_mute_filters()
+        self.assertTrue(rt.is_muted('STIRI SPORTIVE: derby', phrases))
+        self.assertTrue(rt.is_muted('\u0218tiri sportive: derby', phrases))
+        self.assertFalse(rt.is_muted('Stiri politice', phrases))
+
 
 class TestEntryHelpers(unittest.TestCase):
     def test_id_preferred_over_link(self):
