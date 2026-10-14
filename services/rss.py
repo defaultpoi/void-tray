@@ -11,19 +11,19 @@ import threading
 import hashlib
 import logging
 from typing import List, Tuple, Dict, Any, Optional, Set
-from ..config.loader import (
+from config.loader import (
     load_feeds, load_mute_filters, is_muted, load_highlight_words,
     title_is_highlighted, load_feed_mute_rules, entry_matches_mute_rules,
     fold_text, get_entry_id, entry_tag_terms, entry_author_name,
     count_feed_terms, escape_mute_value, feed_source_url, CHECK_INTERVAL
 )
-from ..utils.network import (
+from utils.network import (
     MAX_UNREAD_ITEMS, MAX_ITEM_AGE_SECONDS, SEEN_RETENTION_SECONDS
 )
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
-from ..utils.network import fetch_url_with_retry
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
+from utils.network import fetch_url_with_retry
 
 logger = get_logger(__name__)
 EVENT_FEED_UPDATE = 'feed_update'
@@ -83,7 +83,7 @@ class FeedService:
         logger.debug(f"Checking feeds (force={force})")
 
         # Check connectivity first
-        from ..utils.network import is_online
+        from utils.network import is_online
         if not force and not is_online():
             logger.debug("Offline: skipping feed check")
             return
@@ -273,7 +273,7 @@ class FeedService:
     def _play_notification_sound(self) -> None:
         """Play notification sound for new items."""
         try:
-            from ..utils.network import play_notification_sound
+            from utils.network import play_notification_sound
             play_notification_sound()
         except ImportError:
             logger.debug("Notification sound utility not available")

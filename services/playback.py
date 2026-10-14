@@ -15,14 +15,14 @@ import urllib.request
 import urllib.parse
 from typing import Dict, Any, Optional, Tuple, List
 import logging
-from ..config.loader import (
+from config.loader import (
     get_playback_url, get_streamlink_player, get_streamlink_args,
     get_mpv_socket_path, get_browser_fallback
 )
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
-from ..utils.network import is_online, _free_local_port
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
+from utils.network import is_online, _free_local_port
 
 logger = get_logger(__name__)
 EVENT_PLAYBACK_START = 'playback_start'
@@ -154,7 +154,7 @@ class PlaybackService:
                 streamlink_url = url
 
                 # Get quality settings from config
-                from ..config.loader import load_twitch_qualities, load_youtube_qualities
+                from config.loader import load_twitch_qualities, load_youtube_qualities
                 platform = self._get_platform_from_url(url)
                 if platform == 'youtube':
                     qualities = load_youtube_qualities()
@@ -316,7 +316,7 @@ class PlaybackService:
                 self._stop_streamlink_only()
 
                 # Get quality settings from config
-                from ..config.loader import load_twitch_qualities, load_youtube_qualities
+                from config.loader import load_twitch_qualities, load_youtube_qualities
                 platform = self._get_platform_from_url(url)
                 if platform == 'youtube':
                     qualities = load_youtube_qualities()

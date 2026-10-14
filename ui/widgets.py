@@ -10,9 +10,9 @@ from gi.repository import Gtk, Gdk, Pango, GLib
 import logging
 import time as time_module
 from typing import Optional, Dict, Any, List
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -338,106 +338,393 @@ class TimerControls(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.set_halign(Gtk.Align.FILL)
 
-        # Timer label
-        self._timer_label = Gtk.Label(label="Timer: --:--")
-        self._timer_label.set_halign(Gtk.Align.START)
-        self.pack_start(self._timer_label, False, False, 0)
+        # Load configuration for timer defaults
+        from config.loader import load_timer_settings
+        timer_settings = load_timer_settings()
+        self._max_seconds = timer_settings.get('max_seconds', 7200)  # 2 hours default
+        self._step_seconds = timer_settings.get('step_seconds', 60)
 
-        # Schedule controls
-        schedule_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.pack_start(schedule_box, False, False, 0)
+        # Load schedules from config
+        from config.loader import load_schedule_settings
+        schedule_settings = load_schedule_settings()
+        self._schedules = schedule_settings.get('schedules', [])
 
-        self._schedule_label = Gtk.Label(label="Schedule:")
-        self._schedule_label.set_halign(Gtk.Align.END)
-        schedule_box.pack_start(self._schedule_label, False, False, 0)
+        # Load actions from config
+        from config.loader import load_actions
+        actions = load_actions()
+        self._action_labels = [label for label, command in actions]
 
-        self._schedule_combo = Gtk.ComboBoxText()
-        self._schedule_combo.append_text("Disabled")
-        self._schedule_combo.append_text("Every 15 minutes")
-        self._schedule_combo.append_text("Every 30 minutes")
-        self._schedule_combo.append_text("Hourly")
-        self._schedule_combo.append_text("Every 6 hours")
-        self._schedule_combo.append_text("Daily")
-        self._schedule_combo.set_active(0)  # Disabled by default
-        self._schedule_combo.connect("changed", self._on_schedule_changed)
-        schedule_box.pack_start(self._schedule_combo, True, True, 0)
+        # Timer state
+        self._remaining_time = 0  # seconds remaining in countdown
+        self._timer_running = False
+        self._timer_id = None  # for GLib timeout
+        self._duration_value = 30 * 60  # default duration in seconds (30 minutes)
 
-        # Action buttons
+        # Event bus for state updates
+        self._event_bus = get_event_bus()
+        self._event_bus.subscribe('state_change', self._on_state_change)
+
+        # Create notebook for tabs
+        self._notebook = Gtk.Notebook()
+        self._notebook.set_tab_pos(Gtk.PositionType.TOP)
+        self.pack_start(self._notebook, True, True, 0)
+
+        # Countdown tab
+        countdown_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        countdown_box.set_halign(Gtk.Align.FILL)
+        countdown_box.set_valign(Gtk.Align.FILL)
+
+        # Duration slider
+        slider_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        slider_label = Gtk.Label(label="Duration:")
+        slider_label.set_halign(Gtk.Align.START)
+        slider_box.pack_start(slider_label, False, False, 0)
+        self._duration_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 120, 1)
+        self._duration_scale.set_value(30)  # default 30 minutes
+        self._duration_scale.set_digits(0)
+        self._duration_scale.set_draw_value(True)
+        self._duration_scale.set_hexpand(True)
+        slider_box.pack_start(self._duration_scale, True, True, 0)
+        countdown_box.pack_start(slider_box, False, False, 0)
+
+        # Remaining time label
+        self._remaining_label = Gtk.Label(label="00:00")
+        self._remaining_label.set_halign(Gtk.Align.CENTER)
+        self._remaining_label.set_markup('<span size="xx-large">00:00</span>')
+        countdown_box.pack_start(self._remaining_label, True, True, 0)
+
+        # Control buttons
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.pack_start(button_box, False, False, 0)
-
         self._start_button = Gtk.Button(label="Start")
         self._start_button.connect("clicked", self._on_start_clicked)
         button_box.pack_start(self._start_button, False, False, 0)
+        self._pause_button = Gtk.Button(label="Pause")
+        self._pause_button.connect("clicked", self._on_pause_clicked)
+        button_box.pack_start(self._pause_button, False, False, 0)
+        self._reset_button = Gtk.Button(label="Reset")
+        self._reset_button.connect("clicked", self._on_reset_clicked)
+        button_box.pack_start(self._reset_button, False, False, 0)
+        countdown_box.pack_start(button_box, False, False, 0)
 
-        self._stop_button = Gtk.Button(label="Stop")
-        self._stop_button.connect("clicked", self._on_stop_clicked)
-        button_box.pack_start(self._stop_button, False, False, 0)
+        self._notebook.append_page(countdown_box, Gtk.Label(label="Countdown"))
 
-        self.show_all()
+        # Schedule tab
+        schedule_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        schedule_box.set_halign(Gtk.Align.FILL)
+        schedule_box.set_valign(Gtk.Align.FILL)
+
+        # Schedule list container
+        self._schedule_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        schedule_box.pack_start(self._schedule_list_box, True, True, 0)
+
+        # Add schedule button
+        add_button = Gtk.Button(label="Add Schedule")
+        add_button.connect("clicked", self._on_add_schedule_clicked)
+        schedule_box.pack_start(add_button, False, False, 0)
+
+        self._notebook.append_page(schedule_box, Gtk.Label(label="Schedule"))
+
+        # Load existing schedules into the UI
+        self._load_schedules_into_ui()
+
+        # Do not show automatically; visibility will be controlled by popup window
+
+    def _on_state_change(self, data: Any = None) -> None:
+        """Handle state change events."""
+        self.update()
 
     def update(self) -> None:
         """Update the timer controls based on current state."""
         state = get_state_manager().get_state()
+        remaining = state.get('timer_remaining', 0)
+        running = state.get('timer_running', False)
 
-        # Update timer display
-        elapsed = state.get('timer_elapsed', 0)
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
-        self._timer_label.set_text(f"Timer: {minutes:02d}:{seconds:02d}")
-
-        # Update schedule combo based on state
-        schedule_enabled = state.get('schedule_enabled', False)
-        schedule_interval = state.get('schedule_interval', 0)
-
-        # Map schedule state to combo box index
-        if not schedule_enabled:
-            self._schedule_combo.set_active(0)  # Disabled
-        elif schedule_interval == 900:  # 15 minutes
-            self._schedule_combo.set_active(1)
-        elif schedule_interval == 1800:  # 30 minutes
-            self._schedule_combo.set_active(2)
-        elif schedule_interval == 3600:  # 1 hour
-            self._schedule_combo.set_active(3)
-        elif schedule_interval == 21600:  # 6 hours
-            self._schedule_combo.set_active(4)
-        elif schedule_interval == 86400:  # Daily
-            self._schedule_combo.set_active(5)
-        else:
-            self._schedule_combo.set_active(0)  # Default to disabled
+        # Update remaining time label
+        minutes = int(remaining // 60)
+        seconds = int(remaining % 60)
+        self._remaining_label.set_text(f"{minutes:02d}:{seconds:02d}")
 
         # Update button states
-        timer_running = state.get('timer_running', False)
-        self._start_button.set_sensitive(not timer_running)
-        self._stop_button.set_sensitive(timer_running)
-
-    def _on_schedule_changed(self, combo: Gtk.ComboBoxText) -> None:
-        """Handle schedule combo box change."""
-        active = combo.get_active()
-        schedule_map = {
-            0: (False, 0),      # Disabled
-            1: (True, 900),     # Every 15 minutes
-            2: (True, 1800),    # Every 30 minutes
-            3: (True, 3600),    # Hourly
-            4: (True, 21600),   # Every 6 hours
-            5: (True, 86400)    # Daily
-        }
-
-        enabled, interval = schedule_map.get(active, (False, 0))
-        logger.debug(f"Schedule changed: enabled={enabled}, interval={interval}")
-
-        # TODO: Actually update the schedule through appropriate service
-        # For now, just log the change
+        self._start_button.set_sensitive(not running)
+        self._pause_button.set_sensitive(running)
+        self._reset_button.set_sensitive(not running and remaining > 0)
 
     def _on_start_clicked(self, button: Gtk.Button) -> None:
         """Handle start button click."""
-        logger.debug("Timer start clicked")
-        # TODO: Implement timer start functionality
+        # Get duration from slider (in minutes) and convert to seconds
+        duration_minutes = self._duration_scale.get_value()
+        self._remaining_time = int(duration_minutes * 60)
+        # Update state
+        state_manager = get_state_manager()
+        state_manager.update_state(lambda state: {
+            **state,
+            'timer_remaining': self._remaining_time,
+            'timer_running': True
+        })
+        self._timer_running = True
+        # Start timeout
+        if self._timer_id is not None:
+            GLib.source_remove(self._timer_id)
+        self._timer_id = GLib.timeout_add_seconds(1, self._on_timer_tick)
+        logger.debug(f"Timer started for {duration_minutes} minutes")
 
-    def _on_stop_clicked(self, button: Gtk.Button) -> None:
-        """Handle stop button click."""
-        logger.debug("Timer stop clicked")
-        # TODO: Implement timer stop functionality
+    def _on_pause_clicked(self, button: Gtk.Button) -> None:
+        """Handle pause button click."""
+        self._timer_running = False
+        if self._timer_id is not None:
+            GLib.source_remove(self._timer_id)
+            self._timer_id = None
+        # Update state
+        state_manager = get_state_manager()
+        state_manager.update_state(lambda state: {
+            **state,
+            'timer_running': False
+        })
+        logger.debug("Timer paused")
+
+    def _on_reset_clicked(self, button: Gtk.Button) -> None:
+        """Handle reset button click."""
+        self._timer_running = False
+        if self._timer_id is not None:
+            GLib.source_remove(self._timer_id)
+            self._timer_id = None
+        self._remaining_time = 0
+        # Update state
+        state_manager = get_state_manager()
+        state_manager.update_state(lambda state: {
+            **state,
+            'timer_remaining': 0,
+            'timer_running': False
+        })
+        logger.debug("Timer reset")
+
+    def _on_timer_tick(self) -> bool:
+        """Called every second to update the timer."""
+        if self._remaining_time > 0:
+            self._remaining_time -= 1
+        else:
+            self._remaining_time = 0
+            self._timer_running = False
+            if self._timer_id is not None:
+                GLib.source_remove(self._timer_id)
+                self._timer_id = None
+            # Timer finished - show notification?
+            logger.debug("Timer finished")
+        # Update state
+        state_manager = get_state_manager()
+        state_manager.update_state(lambda state: {
+            **state,
+            'timer_remaining': self._remaining_time,
+            'timer_running': self._timer_running
+        })
+        return self._timer_running  # Continue if still running
+
+    def _load_schedules_into_ui(self) -> None:
+        """Load schedules from self._schedules into the UI."""
+        # Clear existing rows
+        for child in self._schedule_list_box.get_children():
+            self._schedule_list_box.remove(child)
+
+        # Add each schedule as a row
+        for index, schedule in enumerate(self._schedules):
+            row = self._create_schedule_row(schedule, index)
+            self._schedule_list_box.pack_start(row, False, False, 0)
+
+        self._schedule_list_box.show_all()
+
+    def _create_schedule_row(self, schedule: Dict[str, Any], index: int) -> Gtk.Widget:
+        """Create a row widget for a schedule entry."""
+        row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+
+        # Enabled checkbox
+        enabled_cb = Gtk.CheckButton()
+        enabled_cb.set_active(schedule.get('enabled', False))
+        enabled_cb.connect("toggled", self._on_enabled_toggled, index)
+        row_box.pack_start(enabled_cb, False, False, 0)
+
+        # Time entry
+        time_entry = Gtk.Entry()
+        time_entry.set_text(schedule.get('time', '00:00'))
+        time_entry.set_width_chars(5)
+        time_entry.connect("changed", self._on_time_changed, index)
+        row_box.pack_start(time_entry, False, False, 0)
+
+        # Days checkboxes
+        days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        day_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        for day in day_names:
+            cb = Gtk.CheckButton(label=day.capitalize()[:2])  # Mo, Tu, etc.
+            cb.set_active(day in schedule.get('days', []))
+            cb.connect("toggled", self._on_day_toggled, index, day)
+            days_box.pack_start(cb, False, False, 0)
+        row_box.pack_start(days_box, True, True, 0)
+
+        # Action combo box
+        action_combo = Gtk.ComboBoxText()
+        for action_label in self._action_labels:
+            action_combo.append_text(action_label)
+        action_text = schedule.get('action', self._action_labels[0])
+        if action_text in self._action_labels:
+            action_combo.set_active(self._action_labels.index(action_text))
+        else:
+            action_combo.set_active(0)
+        action_combo.connect("changed", self._on_action_changed, index)
+        row_box.pack_start(action_combo, False, False, 0)
+
+        # Remove button
+        remove_button = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
+        remove_button.connect("clicked", self._on_remove_schedule_clicked, index)
+        row_box.pack_start(remove_button, False, False, 0)
+
+        return row_box
+
+    def _on_enabled_toggled(self, check_button: Gtk.CheckButton, index: int) -> None:
+        """Handle enabled checkbox toggle."""
+        enabled = check_button.get_active()
+        self._schedules[index]['enabled'] = enabled
+        self._save_schedules()
+        logger.debug(f"Schedule {index} enabled set to {enabled}")
+
+    def _on_time_changed(self, entry: Gtk.Entry, index: int) -> None:
+        """Handle time entry change."""
+        time_str = entry.get_text()
+        # Validate time format HH:MM
+        import re
+        if re.match(r'^[0-2][0-9]:[0-5][0-9]$', time_str):
+            self._schedules[index]['time'] = time_str
+            self._save_schedules()
+        else:
+            # Revert to previous valid time? For simplicity, we'll just not save invalid.
+            pass
+
+    def _on_day_toggled(self, check_button: Gtk.CheckButton, index: int, day: str) -> None:
+        """Handle day checkbox toggle."""
+        active = check_button.get_active()
+        days = self._schedules[index].get('days', [])
+        if active and day not in days:
+            days.append(day)
+        elif not active and day in days:
+            days.remove(day)
+        self._schedules[index]['days'] = days
+        self._save_schedules()
+        logger.debug(f"Schedule {index} day {day} set to {active}")
+
+    def _on_action_changed(self, combo: Gtk.ComboBoxText, index: int) -> None:
+        """Handle action combo box change."""
+        active = combo.get_active()
+        if 0 <= active < len(self._action_labels):
+            action = self._action_labels[active]
+            self._schedules[index]['action'] = action
+            self._save_schedules()
+            logger.debug(f"Schedule {index} action set to {action}")
+
+    def _on_remove_schedule_clicked(self, button: Gtk.Button, index: int) -> None:
+        """Handle remove schedule button click."""
+        del self._schedules[index]
+        self._save_schedules()
+        self._load_schedules_into_ui()
+        logger.debug(f"Schedule {index} removed")
+
+    def _on_add_schedule_clicked(self, button: Gtk.Button) -> None:
+        """Handle add schedule button click."""
+        # Show a dialog to add a new schedule
+        dialog = Gtk.Dialog(title="Add Schedule",
+                            transient_for=self.get_toplevel(),
+                            flags=0)
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                           Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dialog.set_default_size(400, 200)
+
+        content_area = dialog.get_content_area()
+        # Create a box for the dialog content
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        vbox.set_border_width(6)
+        content_area.add(vbox)
+
+        # Enabled checkbox
+        enabled_cb = Gtk.CheckButton(label="Enabled")
+        enabled_cb.set_active(True)
+        vbox.pack_start(enabled_cb, False, False, 0)
+
+        # Time entry
+        hbox_time = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        vbox.pack_start(hbox_time, False, False, 0)
+        label_time = Gtk.Label(label="Time (HH:MM):")
+        label_time.set_halign(Gtk.Align.START)
+        hbox_time.pack_start(label_time, False, False, 0)
+        time_entry = Gtk.Entry()
+        time_entry.set_text("00:00")
+        time_entry.set_width_chars(5)
+        hbox_time.pack_start(time_entry, True, True, 0)
+
+        # Days checkboxes
+        vbox.pack_start(Gtk.Label(label="Days:"), False, False, 0)
+        days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        day_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        day_checkboxes = {}
+        for day in day_names:
+            cb = Gtk.CheckButton(label=day.capitalize()[:2])
+            day_checkboxes[day] = cb
+            days_box.pack_start(cb, False, False, 0)
+        vbox.pack_start(days_box, False, False, 0)
+
+        # Action combo box
+        hbox_action = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        vbox.pack_start(hbox_action, False, False, 0)
+        label_action = Gtk.Label(label="Action:")
+        label_action.set_halign(Gtk.Align.START)
+        hbox_action.pack_start(label_action, False, False, 0)
+        action_combo = Gtk.ComboBoxText()
+        for action_label in self._action_labels:
+            action_combo.append_text(action_label)
+        if self._action_labels:
+            action_combo.set_active(0)
+        hbox_action.pack_start(action_combo, True, True, 0)
+
+        vbox.show_all()
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            enabled = enabled_cb.get_active()
+            time_str = time_entry.get_text()
+            # Validate time
+            import re
+            if not re.match(r'^[0-2][0-9]:[0-5][0-9]$', time_str):
+                time_str = "00:00"
+            days = [day for day, cb in day_checkboxes.items() if cb.get_active()]
+            action_index = action_combo.get_active()
+            action = self._action_labels[action_index] if 0 <= action_index < len(self._action_labels) else self._action_labels[0]
+            new_schedule = {
+                'enabled': enabled,
+                'time': time_str,
+                'days': days,
+                'action': action
+            }
+            self._schedules.append(new_schedule)
+            self._save_schedules()
+            self._load_schedules_into_ui()
+            logger.debug(f"Added new schedule: {new_schedule}")
+        dialog.destroy()
+
+    def _save_schedules(self) -> None:
+        """Save schedules to config file."""
+        from config.loader import get_config_loader
+        loader = get_config_loader()
+        config = loader.load()
+        # Build schedule lines
+        lines = []
+        for schedule in self._schedules:
+            enabled_str = "on" if schedule['enabled'] else "off"
+            time_str = schedule['time']
+            days_str = ','.join(schedule['days']) if schedule['days'] else 'daily'  # default to daily if none
+            action_str = schedule['action']
+            line = f"{enabled_str}|{time_str}|{days_str}|{action_str}"
+            lines.append(line)
+        config['schedule'] = '\n'.join(lines)
+        loader.save(config)
+        logger.debug("Schedules saved to config")
+
+
 
 
 class LauncherPanel(Gtk.Box):
@@ -449,10 +736,10 @@ class LauncherPanel(Gtk.Box):
         self.get_style_context().add_class("launcher-panel")
 
         self._build_launcher_list()
-        self.show_all()
+        # Do not show automatically; visibility will be controlled by popup window
 
     def _build_launcher_list(self):
-        from ..config.loader import get_config_loader
+        from config.loader import get_config_loader
         loader = get_config_loader()
         entries = loader.load_launcher_entries()
 
@@ -471,7 +758,7 @@ class LauncherPanel(Gtk.Box):
     def _on_launch_clicked(self, button, command):
         import subprocess
         import logging
-        from ..utils.logger import get_logger
+        from utils.logger import get_logger
         logger = get_logger(__name__)
 
         logger.debug(f"Launching command: {command}")
@@ -720,8 +1007,8 @@ class LiveNowRow(Gtk.EventBox):
 
     def _on_left_click(self):
         """Handle left-click - open stream with streamlink and mpv."""
-        from ..services.playback import get_playback_service
-        from ..utils.logger import get_logger
+        from services.playback import get_playback_service
+        from utils.logger import get_logger
 
         logger = get_logger(__name__)
 
@@ -749,7 +1036,7 @@ class LiveNowRow(Gtk.EventBox):
 
     def _on_right_click(self):
         """Handle right-click - do nothing (user does not want to remove from live list)."""
-        from ..utils.logger import get_logger
+        from utils.logger import get_logger
         logger = get_logger(__name__)
         logger.debug(f"Right-clicked on livestream: {self._stream_data.get('platform', 'unknown')}://{self._stream_data.get('channel', 'unknown')} - no action taken")
 
@@ -804,8 +1091,8 @@ class FeedItemRow(Gtk.EventBox):
 
     def _mark_item_as_read(self):
         """Mark the item as read (update state and trigger UI refresh)."""
-        from ..core.state import get_state_manager
-        from ..core.event_bus import get_event_bus
+        from core.state import get_state_manager
+        from core.event_bus import get_event_bus
 
         item_id = self._item_data.get('id')
         if not item_id:
@@ -870,7 +1157,7 @@ class FooterBar(Gtk.Box):
         get_event_bus().publish('toggle_timer_controls', {})
     def _on_config(self, _):
         import subprocess
-        from ..config.schema import CONFIG_FILE
+        from config.schema import CONFIG_FILE
         logger.debug(f"Footer: Opening config file: {CONFIG_FILE}")
         try:
             subprocess.Popen(['mousepad', CONFIG_FILE])
@@ -880,8 +1167,8 @@ class FooterBar(Gtk.Box):
         get_event_bus().publish('manual_refresh', {})
     def _on_mark_read(self, _):
         """Mark all feed items as read (update state and trigger UI refresh)."""
-        from ..core.state import get_state_manager
-        from ..core.event_bus import get_event_bus
+        from core.state import get_state_manager
+        from core.event_bus import get_event_bus
         import time as time_module
 
         state_manager = get_state_manager()

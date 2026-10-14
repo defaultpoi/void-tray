@@ -15,14 +15,14 @@ import json
 import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
-from ..config.loader import (
+from config.loader import (
     load_livestream_settings, get_livestream_check_interval,
     get_twitch_client_id, get_youtube_api_key
 )
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
-from ..utils.network import fetch_json_with_retry, is_online
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
+from utils.network import fetch_json_with_retry, is_online
 
 logger = get_logger(__name__)
 EVENT_LIVESTREAM_UPDATE = 'livestream_update'

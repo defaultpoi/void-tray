@@ -13,9 +13,9 @@ from gi.repository import Gtk, GLib, GdkPixbuf, Gdk
 import logging
 import threading
 from typing import Optional, Callable
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -136,7 +136,7 @@ class TrayIcon:
             return
 
         # Import here to avoid circular imports
-        from .popup_window import get_popup_window
+        from opup_window import get_popup_window
 
         if not hasattr(self, '_popup_window') or self._popup_window is None:
             self._popup_window = get_popup_window()

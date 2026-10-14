@@ -11,9 +11,9 @@ from gi.repository import Gtk, GLib, Gdk, Pango
 import logging
 import threading
 from typing import Optional, Callable, List, Dict, Any, Tuple
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
 from .widgets import (
     WeatherHeader, SectionHeader, LiveNowRow,
     FeedItemRow, FooterBar, TimerControls, LauncherButton
@@ -204,18 +204,11 @@ class PopupWindow:
 
         # Create timer controls
         self._timer_controls = TimerControls()
-        self._timer_controls.set_visible(False)
-        self._main_box.pack_start(self._timer_controls, False, False, 0)
-
-        # Create timer controls
-        self._timer_controls = TimerControls()
-        self._timer_controls.set_visible(False)
         self._main_box.pack_start(self._timer_controls, False, False, 0)
 
         # Create launcher panel
         from .widgets import LauncherPanel
         self._launcher_panel = LauncherPanel()
-        self._launcher_panel.set_visible(False)
         self._main_box.pack_start(self._launcher_panel, False, False, 0)
 
         # Create footer
@@ -228,6 +221,10 @@ class PopupWindow:
 
         # Show all widgets
         self._window.show_all()
+        # Ensure launcher panel starts hidden
+        self._launcher_panel.set_visible(False)
+        # Ensure timer controls start hidden
+        self._timer_controls.set_visible(False)
         self._window_created = True
 
         logger.debug("Popup window created")
@@ -235,16 +232,24 @@ class PopupWindow:
     def _on_toggle_timer(self, data: Any = None) -> None:
         """Toggle visibility of timer controls."""
         if self._timer_controls:
-            visible = self._timer_controls.get_visible()
-            self._timer_controls.set_visible(not visible)
-            logger.debug(f"Timer controls visibility toggled to: {not visible}")
+            if self._timer_controls.get_visible():
+                self._timer_controls.hide()
+                new_visible = False
+            else:
+                self._timer_controls.show_all()
+                new_visible = True
+            logger.debug(f"Timer controls visibility toggled to: {new_visible}")
 
     def _on_toggle_launcher(self, data: Any = None) -> None:
         """Toggle visibility of launcher panel."""
         if self._launcher_panel:
-            visible = self._launcher_panel.get_visible()
-            self._launcher_panel.set_visible(not visible)
-            logger.debug(f"Launcher panel visibility toggled to: {not visible}")
+            if self._launcher_panel.get_visible():
+                self._launcher_panel.hide()
+                new_visible = False
+            else:
+                self._launcher_panel.show_all()
+                new_visible = True
+            logger.debug(f"Launcher panel visibility toggled to: {new_visible}")
 
 
     def _on_focus_out(self, widget: Gtk.Widget, event: Gdk.EventFocus) -> bool:
@@ -428,9 +433,14 @@ class PopupWindow:
                 feeds_dict.setdefault(feed_title, []).append(item)
 
             for feed_title, items in feeds_dict.items():
-                # Section header for the feed
+                # Create clickable section header for the feed
+                event_box = Gtk.EventBox()
+                event_box.set_visible_window(False)  # Not necessary but good practice
                 header = SectionHeader(feed_title)
-                self._item_list_box.pack_start(header, False, False, 0)
+                event_box.add(header)
+                # Connect left-click event to mark all items of this feed as seen
+                event_box.connect("button-release-event", self._on_feed_title_clicked, feed_title)
+                self._item_list_box.pack_start(event_box, False, False, 0)
 
                 # Items for this feed
                 for item in items[:20]:  # Limit items per feed
@@ -520,6 +530,55 @@ class PopupWindow:
         """Handle severe weather update events."""
         if self._weather_bar:
             GLib.idle_add(self._weather_bar.update)
+
+    def _on_feed_title_clicked(self, widget, event, feed_title):
+        """Handle left-click on a feed title to mark all its items as seen."""
+        if event.button == Gdk.BUTTON_PRIMARY:  # Left click
+            self._mark_feed_items_as_seen(feed_title)
+            return False  # Allow event to propagate for drag/resize handling
+        return False
+
+    def _mark_feed_items_as_seen(self, feed_title: str) -> None:
+        """Mark all items of the specified feed as seen."""
+        from core.state import get_state_manager
+        from core.event_bus import get_event_bus
+        import time as time_module
+
+        state_manager = get_state_manager()
+        event_bus = get_event_bus()
+
+        def updater(state_dict):
+            # Get all currently unread items
+            unread = state_dict.get('unread', [])
+            if not unread:
+                return state_dict
+
+            # Find items belonging to the specified feed
+            feed_items = [item for item in unread if item.get('feed_title') == feed_title]
+            if not feed_items:
+                return state_dict
+
+            # Mark these items as seen
+            seen = state_dict.get('seen', {})
+            now = time_module.time()
+            for item in feed_items:
+                item_id = item.get('id')
+                if item_id:
+                    seen[item_id] = now
+
+            # Remove these items from unread list
+            unread = [item for item in unread if item.get('feed_title') != feed_title]
+            state_dict['unread'] = unread
+            state_dict['seen'] = seen
+
+            return state_dict
+
+        state_manager.update_state(updater)
+        state_manager.save_to_disk()
+
+        # Notify that items have been updated to refresh the popup
+        event_bus.publish('feed_update', {})
+        logger.debug(f"Marked all items as seen for feed: {feed_title}")
 
     def _on_livestream_online(self, data: Any = None) -> None:
         """Handle livestream online events."""

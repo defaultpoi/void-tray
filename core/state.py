@@ -8,7 +8,7 @@ persistence to disk, and validation.
 import threading
 import time as time_module
 from typing import Dict, List, Tuple, Any, Optional, Set
-from ..config.loader import (
+from config.loader import (
     load_state, save_state, get_entry_id, entry_matches_mute_rules,
     fold_text, is_muted, load_feeds, load_mute_filters, load_highlight_words,
     load_feed_mute_rules, load_twitch_channels, load_youtube_channels,
@@ -21,7 +21,7 @@ from ..config.loader import (
     entry_matches_mute_rules as entry_matches_mute_rules_func,
     escape_mute_value, feed_source_url
 )
-from ..utils.logger import get_logger
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 

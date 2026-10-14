@@ -581,6 +581,32 @@ def load_schedule_settings() -> Dict[str, Any]:
     settings['schedules'] = schedule_entries
     return settings
 
+def load_timer_settings() -> Dict[str, Any]:
+    """
+    Returns dict with timer settings: max_seconds, step_seconds.
+    """
+    settings = {
+        'max_seconds': 7200,  # 2 hours default
+        'step_seconds': 60,   # 1 minute default
+    }
+
+    sections = _read_config_sections()['timer']
+    for line in sections:
+        line = line.strip()
+        if not line or '=' in line:
+            # We only want to parse key=value lines for settings? Actually, the [timer] section may have comments and key=value.
+            # We'll parse lines that have '=' and are not comments.
+            if '=' in line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                if key in ('max_seconds', 'step_seconds'):
+                    try:
+                        settings[key] = int(value)
+                    except ValueError:
+                        pass
+    return settings
+
 
 def load_network_reset_command() -> str:
     """Returns the reset command from [network] section."""

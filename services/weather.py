@@ -11,15 +11,15 @@ import json
 import logging
 from typing import Dict, Any, Optional, Tuple, List
 import feedparser
-from ..config.loader import (
+from config.loader import (
     load_weather_settings, load_severe_weather_settings,
     get_weather_location, get_weather_update_interval,
     get_severe_weather_update_interval
 )
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
-from ..utils.network import fetch_json_with_retry, fetch_url_with_retry, is_online, diagnose_connectivity
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
+from utils.network import fetch_json_with_retry, fetch_url_with_retry, is_online, diagnose_connectivity
 
 logger = get_logger(__name__)
 EVENT_WEATHER_UPDATE = 'weather_update'

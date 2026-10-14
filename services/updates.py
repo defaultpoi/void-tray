@@ -10,14 +10,14 @@ import time as time_module
 import threading
 import logging
 from typing import Dict, Any, Optional, Tuple, List
-from ..config.loader import (
+from config.loader import (
     load_update_settings, get_update_check_interval,
     get_update_auto_install, get_update_reboot_required
 )
-from ..core.state import get_state_manager
-from ..core.event_bus import get_event_bus
-from ..utils.logger import get_logger
-from ..utils.network import is_online
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from utils.logger import get_logger
+from utils.network import is_online
 
 logger = get_logger(__name__)
 EVENT_UPDATE_CHECK = 'update_check'

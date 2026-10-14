@@ -11,23 +11,26 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('Notify', '0.7')
 from gi.repository import Gtk, GLib, Gio, Notify
 import signal
-import sys
 import logging
 import threading
 from typing import Optional
-from .config.loader import get_config_loader
-from .core.state import get_state_manager
-from .core.event_bus import get_event_bus
-from .services.rss import get_feed_service
-from .services.weather import get_weather_service
-from .services.updates import get_updates_service
-from .services.livestreams import get_livestreams_service
-from .services.playback import get_playback_service
-from .ui.tray import get_tray_icon
-from .ui.popup_window import get_popup_window
-from .ui.styles import apply_css_styles
-from .utils.logger import get_logger
-from .utils.network import is_online
+
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config.loader import get_config_loader
+from core.state import get_state_manager
+from core.event_bus import get_event_bus
+from services.rss import get_feed_service
+from services.weather import get_weather_service
+from services.updates import get_updates_service
+from services.livestreams import get_livestreams_service
+from services.playback import get_playback_service
+from ui.tray import get_tray_icon
+from ui.popup_window import get_popup_window
+from ui.styles import apply_css_styles
+from utils.logger import get_logger
+from utils.network import is_online
 
 logger = get_logger(__name__)
 
