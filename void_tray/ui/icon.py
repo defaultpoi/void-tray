@@ -110,30 +110,7 @@ class IconMixin:
             # instead of splitting the space with it. The glyph still shows
             # in the popup's weather bar, where space isn't constrained.
             ctx.set_source_rgba(1, 1, 1, 1)
-            temp_text = f"{self.weather_data['temp']:.0f}"
-            padding = 1
-            max_width = size - 2 * padding - TEMP_RING_RESERVE  # room for the ring
-
-            ctx.select_font_face('Sans', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-            temp_size = 20
-            min_temp_size = 10
-            while temp_size > min_temp_size:
-                ctx.set_font_size(temp_size)
-                if ctx.text_extents(temp_text)[4] <= max_width:
-                    break
-                temp_size -= 1
-
-            xb, yb, tw, th, _dx, _dy = ctx.text_extents(temp_text)
-            digits_left, ring_cx, ring_cy = temp_icon_layout(size, tw, th)
-            ctx.move_to(digits_left - xb, size / 2 - th / 2 - yb)
-            ctx.show_text(temp_text)
-            ctx.set_line_width(TEMP_RING_LINE_WIDTH)
-            ctx.new_sub_path()
-            # snap the centre to a pixel centre so the tiny ring is drawn
-            # crisp (full-intensity pixels) instead of a blurry grey dot
-            ctx.arc(math.floor(ring_cx) + 0.5, math.floor(ring_cy) + 0.5,
-                    TEMP_RING_RADIUS, 0, 2 * 3.14159265)
-            ctx.stroke()
+            self._draw_temperature(ctx, size)
         else:
             worst_alert_color = self._worst_alert_color()
             if worst_alert_color:
@@ -149,12 +126,47 @@ class IconMixin:
             ctx.fill()
 
             ctx.set_source_rgba(1, 1, 1, 1)
-            text = str(count) if count < 100 else '99+'
-            ctx.select_font_face('Sans', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-            ctx.set_font_size(12 if len(text) <= 2 else 8)
-            xb, yb, w, h, dx, dy = ctx.text_extents(text)
-            ctx.move_to(size / 2 - w / 2 - xb, size / 2 - h / 2 - yb)
-            ctx.show_text(text)
+            if count == 0 and worst_alert_color and self._current_temperature() is not None:
+                # an alert with nothing unread: the pulsing disc shows the
+                # temperature instead of a meaningless 0
+                self._draw_temperature(ctx, size, padding=4, max_font=12, min_font=7)
+            else:
+                text = str(count) if count < 100 else '99+'
+                ctx.select_font_face('Sans', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+                ctx.set_font_size(12 if len(text) <= 2 else 8)
+                xb, yb, w, h, dx, dy = ctx.text_extents(text)
+                ctx.move_to(size / 2 - w / 2 - xb, size / 2 - h / 2 - yb)
+                ctx.show_text(text)
 
         surface.flush()
         return Gdk.pixbuf_get_from_surface(surface, 0, 0, size, size)
+
+    def _current_temperature(self):
+        return self.weather_data.get('temp') if self.weather_data else None
+
+    def _draw_temperature(self, ctx, size, padding=1, max_font=20, min_font=10):
+        """Draws the current temperature in the current colour, the digits and
+        the small degree ring centred together; the font shrinks from max_font
+        until the digits fit the width left by `padding` and the ring."""
+        temp_text = f"{self.weather_data['temp']:.0f}"
+        max_width = size - 2 * padding - TEMP_RING_RESERVE  # room for the ring
+
+        ctx.select_font_face('Sans', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        temp_size = max_font
+        while temp_size > min_font:
+            ctx.set_font_size(temp_size)
+            if ctx.text_extents(temp_text)[4] <= max_width:
+                break
+            temp_size -= 1
+
+        xb, yb, tw, th, _dx, _dy = ctx.text_extents(temp_text)
+        digits_left, ring_cx, ring_cy = temp_icon_layout(size, tw, th)
+        ctx.move_to(digits_left - xb, size / 2 - th / 2 - yb)
+        ctx.show_text(temp_text)
+        ctx.set_line_width(TEMP_RING_LINE_WIDTH)
+        ctx.new_sub_path()
+        # snap the centre to a pixel centre so the tiny ring is drawn
+        # crisp (full-intensity pixels) instead of a blurry grey dot
+        ctx.arc(math.floor(ring_cx) + 0.5, math.floor(ring_cy) + 0.5,
+                TEMP_RING_RADIUS, 0, 2 * 3.14159265)
+        ctx.stroke()
