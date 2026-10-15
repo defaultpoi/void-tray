@@ -12,6 +12,64 @@ class TestTimerFormat(unittest.TestCase):
         self.assertEqual(rt.format_timer_duration(7200), '2 Hours, 00 Minutes and 00 Seconds')
 
 
+class TestTimerCountdownText(unittest.TestCase):
+    def test_shows_the_clock_time_the_countdown_ends(self):
+        # 10:36:40 + 4 h 34 min 23 s = 15:11:03
+        text = rt.format_timer_countdown(4 * 3600 + 34 * 60 + 23, now=ts(0, 10, 36, 40))
+        self.assertEqual(text, '4 Hours, 34 Minutes and 23 Seconds (15:11)')
+
+    def test_end_time_drops_the_seconds_instead_of_rounding_up(self):
+        self.assertEqual(rt.format_timer_countdown(60 + 59, now=ts(0, 15, 9, 0)), '0 Hours, 01 Minutes and 59 Seconds (15:10)')
+
+    def test_end_time_is_zero_padded_and_wraps_past_midnight(self):
+        self.assertTrue(rt.format_timer_countdown(3600, now=ts(0, 23, 30)).endswith('(00:30)'))
+        self.assertTrue(rt.format_timer_countdown(5 * 60, now=ts(0, 7, 0)).endswith('(07:05)'))
+
+    def test_nothing_counting_has_no_end_time(self):
+        self.assertEqual(rt.format_timer_countdown(0, now=ts(0, 10)), rt.format_timer_duration(0))
+
+    def test_defaults_to_the_current_time(self):
+        with mock.patch.object(rt.time_module, 'time', return_value=ts(2, 12, 0, 30)):
+            self.assertEqual(rt.format_timer_countdown(30 * 60), '0 Hours, 30 Minutes and 00 Seconds (12:30)')
+
+
+class TestTimerLabelUpdates(unittest.TestCase):
+    class Stub:
+        _update_timer_widgets = rt.RssTray._update_timer_widgets
+        on_timer_slider_changed = rt.RssTray.on_timer_slider_changed
+
+        def __init__(self):
+            self.timer_scale = mock.Mock()
+            self.timer_label = mock.Mock()
+            self.timer_mode = 'countdown'
+            self.timer_remaining_seconds = 0
+            self.timer_running = False
+            self.timer_deadline = None
+            self._timer_updating_ui = False
+
+    def test_dragging_the_slider_shows_the_end_time(self):
+        stub = self.Stub()
+        scale = mock.Mock()
+        scale.get_value.return_value = 3600
+        with mock.patch.object(rt.time_module, 'time', return_value=ts(0, 10, 0)):
+            stub.on_timer_slider_changed(scale)
+        stub.timer_label.set_text.assert_called_with('1 Hours, 00 Minutes and 00 Seconds (11:00)')
+
+    def test_each_tick_keeps_the_end_time_in_the_label(self):
+        stub = self.Stub()
+        stub.timer_remaining_seconds = 90
+        with mock.patch.object(rt.time_module, 'time', return_value=ts(0, 10, 0)):
+            stub._update_timer_widgets()
+        stub.timer_label.set_text.assert_called_with('0 Hours, 01 Minutes and 30 Seconds (10:01)')
+
+    def test_schedule_mode_keeps_its_own_summary(self):
+        stub = self.Stub()
+        stub.timer_mode = 'schedule'
+        stub.timer_remaining_seconds = 90
+        stub._update_timer_widgets()
+        stub.timer_label.set_text.assert_not_called()
+
+
 class TestScheduleRuntime(TmpConfigCase):
     class Stub:
         _schedule_settings = rt.RssTray._schedule_settings

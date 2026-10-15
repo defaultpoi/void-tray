@@ -14,7 +14,7 @@ from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN
 from ..desktop import edit_file_externally, is_fullscreen_active, run_launcher_command
 from ..playback import open_twitch_stream, open_youtube_stream
 from ..rules import feed_source_url, item_detail_text, title_is_highlighted
-from .timer import format_timer_duration
+from .timer import format_timer_countdown
 
 
 MAX_LIST_ITEMS = 40
@@ -251,7 +251,7 @@ class PopupMixin:
         timer_label = Gtk.Label()
         timer_label.set_xalign(1)
         timer_label.set_hexpand(True)
-        timer_label.set_text(format_timer_duration(self.timer_remaining_seconds))
+        timer_label.set_text(format_timer_countdown(self.timer_remaining_seconds))
         self.timer_label = timer_label
         header.pack_start(mode_row, False, False, 0)
         header.pack_start(timer_label, True, True, 0)

@@ -43,6 +43,19 @@ def format_timer_duration(total_seconds):
     return f"{h} Hours, {m:02d} Minutes and {s:02d} Seconds"
 
 
+def format_timer_countdown(total_seconds, now=None):
+    """The remaining time followed by the clock time it ends at, e.g.
+    '4 Hours, 34 Minutes and 23 Seconds (15:11)'. At zero nothing is counting,
+    so there is no end time. `now` is epoch seconds (default: the current time)."""
+    text = format_timer_duration(total_seconds)
+    if total_seconds <= 0:
+        return text
+    if now is None:
+        now = time_module.time()
+    end_clock = time_module.strftime('%H:%M', time_module.localtime(now + total_seconds))
+    return f"{text} ({end_clock})"
+
+
 class TimerMixin:
     # ---- Schedule mode ------------------------------------------------------
     def _schedule_settings(self):
@@ -251,7 +264,7 @@ class TimerMixin:
         if schedule:
             self._refresh_schedule_ui()
         else:
-            self.timer_label.set_text(format_timer_duration(self.timer_remaining_seconds))
+            self.timer_label.set_text(format_timer_countdown(self.timer_remaining_seconds))
 
     def on_timer_mode_toggled(self, button, mode):
         if self._mode_updating:
@@ -464,7 +477,7 @@ class TimerMixin:
         self.timer_scale.set_value(self.timer_remaining_seconds)
         self._timer_updating_ui = False
         if self.timer_mode == 'countdown':  # in Schedule mode the label shows the schedule summary
-            self.timer_label.set_text(format_timer_duration(self.timer_remaining_seconds))
+            self.timer_label.set_text(format_timer_countdown(self.timer_remaining_seconds))
 
     def on_timer_slider_changed(self, scale):
         if self._timer_updating_ui:
@@ -474,4 +487,4 @@ class TimerMixin:
         self.timer_running = value > 0
         self.timer_deadline = (time_module.monotonic() + value) if value > 0 else None
         if self.timer_label is not None:
-            self.timer_label.set_text(format_timer_duration(value))
+            self.timer_label.set_text(format_timer_countdown(value))
