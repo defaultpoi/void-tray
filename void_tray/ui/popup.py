@@ -14,7 +14,7 @@ from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN
 from ..desktop import edit_file_externally, is_fullscreen_active, run_launcher_command
 from ..playback import open_twitch_stream, open_youtube_stream
 from ..rules import feed_source_url, item_detail_text, title_is_highlighted
-from .timer import format_timer_countdown
+from .timer import TIMER_RESERVED_HEIGHT_PX, format_timer_countdown
 
 
 MAX_LIST_ITEMS = 40
@@ -197,6 +197,7 @@ class PopupMixin:
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_propagate_natural_height(True)
+        scroller.set_min_content_height(TIMER_RESERVED_HEIGHT_PX)  # room for the Schedule slide even with an empty list
         self.scroller = scroller
         self.listbox = Gtk.ListBox()
         self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)

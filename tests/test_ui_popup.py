@@ -167,5 +167,32 @@ class TestItemTooltipDetails(unittest.TestCase):
         self.assertIsNone(self.tooltip({'id': '1', 'link': 'l', 'title': 'Short'}))
 
 
+class TestPopupReservesRoomForTheScheduleSlide(unittest.TestCase):
+    """The popup window is never resized, so a short or empty list must already
+    be tall enough for the Schedule slide when the person switches to it."""
+
+    def build(self):
+        gtk = mock.MagicMock()
+        app = mock.MagicMock()
+        app.timer_remaining_seconds = 0
+        app.timer_mode = 'countdown'
+        app.timer_visible = True
+        with mock.patch.object(rt, 'Gtk', gtk), mock.patch.object(rt, 'Gdk', mock.MagicMock()), \
+                mock.patch.object(rt, 'load_timer_settings', return_value={'max_seconds': 7200, 'step_seconds': 60}):
+            rt.RssTray.build_popup_window(app)
+        return gtk.ScrolledWindow.return_value
+
+    def test_the_list_area_is_at_least_as_tall_as_the_schedule_slide_plus_a_row(self):
+        scroller = self.build()
+        scroller.set_min_content_height.assert_called_once_with(rt.TIMER_RESERVED_HEIGHT_PX)
+        self.assertGreaterEqual(
+            rt.TIMER_RESERVED_HEIGHT_PX,
+            rt.LIST_ROW_RESERVE_PX + rt.TIMER_HEIGHT_SCHEDULE_PX + rt.TIMER_SPACER_EXTRA_PX)
+
+    def test_the_reserve_covers_the_slide_it_is_for(self):
+        self.assertGreater(rt.TIMER_RESERVED_HEIGHT_PX, rt.TIMER_HEIGHT_SCHEDULE_PX)
+        self.assertGreater(rt.TIMER_HEIGHT_SCHEDULE_PX, rt.TIMER_HEIGHT_COUNTDOWN_PX)
+
+
 if __name__ == '__main__':
     unittest.main()

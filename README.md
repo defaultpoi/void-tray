@@ -35,7 +35,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
 - **Timer:** a slide behind the "Timer" footer button with two modes, switched at its top left:
   - **Countdown:** a slider (0 to 2 h in 1-minute steps by default; the maximum and the step are configurable with `max=<minutes>` and `step=<seconds>` in `[timer]`, see below). The label shows the time left and, in brackets, the clock time it ends at (e.g. `4 Hours, 34 Minutes and 23 Seconds (15:11)`). It counts down against a fixed deadline, keeps counting with the popup closed, and plays the notification sound twice at zero.
-  - **Schedule:** recurring actions instead of a sound, e.g. suspend the machine every night and lock the screen on weekday mornings (see "Scheduled actions" below). Add as many schedules as you like; each has its own time, days and action, set right in the slide and stored in `config.conf`.
+  - **Schedule:** recurring actions instead of a sound, e.g. suspend the machine every night and lock the screen on weekday mornings (see "Scheduled actions" below). Add as many schedules as you like; each has its own time, days and action, set right in the slide and stored in `config.conf`. The popup is always tall enough for this slide, even with nothing unread.
 - **Launcher:** a "Launch" footer button opens a list of your own commands (the `[launcher]` section, `Label|command` per line); clicking one runs it detached through the shell and closes the popup. The list is read when you open it, so edits apply immediately.
 
 ### Connectivity

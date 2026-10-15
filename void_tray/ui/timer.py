@@ -36,6 +36,14 @@ TIMER_HEIGHT_SCHEDULE_PX = 134
 TIMER_SPACER_EXTRA_PX = 25  # gap kept above the slide
 
 
+# The popup window is never resized, so the list area is reserved at its
+# largest need: a short or empty list must still leave room for the taller
+# Schedule slide plus one list row (the 35 px "No unread items" message),
+# or the slide's top, the mode buttons, is pushed out of view.
+LIST_ROW_RESERVE_PX = 35
+TIMER_RESERVED_HEIGHT_PX = LIST_ROW_RESERVE_PX + TIMER_HEIGHT_SCHEDULE_PX + TIMER_SPACER_EXTRA_PX
+
+
 def format_timer_duration(total_seconds):
     h = total_seconds // 3600
     m = (total_seconds % 3600) // 60
