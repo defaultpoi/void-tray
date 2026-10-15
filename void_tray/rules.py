@@ -94,6 +94,14 @@ def title_is_highlighted(title, words):
     return any(re.search(r'(?<!\w)' + re.escape(word) + r'(?!\w)', folded) for word in words)
 
 
+def item_is_highlighted(item, words):
+    """True when the item's title, or any of its categories, contains one of
+    `words` as a whole word/phrase (see title_is_highlighted)."""
+    if title_is_highlighted(item.get('title', ''), words):
+        return True
+    return any(title_is_highlighted(term, words) for term in entry_tag_terms(item))
+
+
 def feed_source_url(feed_url, feed_links):
     """The website a feed belongs to: the link the feed itself declares, else
     the feed address's own origin (https://host/)."""

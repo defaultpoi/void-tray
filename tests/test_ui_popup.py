@@ -112,6 +112,16 @@ class TestBreakingPulse(unittest.TestCase):
         self.assertEqual(stub._breaking_rows, [breaking])
         self.assertNotIn(plain, stub._breaking_rows)
 
+    def test_build_row_also_registers_items_highlighted_by_a_category(self):
+        stub = self.Stub()
+        with mock.patch.object(rt.Gtk, 'ListBoxRow', side_effect=self.make_row), mock.patch.object(rt.Gtk, 'Box'), \
+                mock.patch.object(rt.Gtk, 'Button'), mock.patch.object(rt.Gtk, 'Image'), mock.patch.object(rt.Gtk, 'Label'), \
+                mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x):
+            tagged = stub.build_row({'id': '1', 'link': 'l', 'title': 'Quiet day', 'tags': ['Sport', 'Breaking News']})
+            other = stub.build_row({'id': '2', 'link': 'l', 'title': 'Quiet day', 'tags': ['Sport']})
+        self.assertEqual(stub._breaking_rows, [tagged])
+        self.assertNotIn(other, stub._breaking_rows)
+
     def test_tick_toggles_the_pulse_class_on_every_highlighted_row(self):
         stub = self.Stub()
         row = self.make_row()

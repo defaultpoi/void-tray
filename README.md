@@ -13,7 +13,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
   Live Twitch and YouTube channels are deliberately not counted in the badge.
 - **Popup list** grouped by feed. Left-click a row to open it and mark it read, right-click a row to mark it read only, click a feed header to mark the whole feed read, middle-click it to open the feed's website, right-click it for the feed menu (below). Hovering a news item shows its categories and author. The popup auto-opens on new items and closes on focus-out; if it is already open when something new arrives, the list is updated in place (scroll position and an open Launch list are kept).
-- **Breaking news:** a news item whose title contains the word "breaking" (whole word, any case, accents ignored) pulses a light red in the popup until you read or dismiss it. The words are configurable: put them under `[highlight]`, one per line or separated by `|` (for example `breaking|urgent`); with no `[highlight]` lines the default is `breaking`.
+- **Breaking news:** a news item whose title, or one of whose categories, contains the word "breaking" (whole word, any case, accents ignored) pulses a light red in the popup until you read or dismiss it; the categories are the ones listed in the item's tooltip. The words are configurable: put them under `[highlight]`, one per line or separated by `|` (for example `breaking|urgent`); with no `[highlight]` lines the default is `breaking`.
 - **Feeds:** per-feed check intervals, custom display names, mute phrases (global, in `[mute]`) and per-feed mute rules (see below). Items older than 24 h are silently marked seen the first time they are seen. A feed that fails to load is retried after 2 minutes rather than a full interval, and feeds are not polled while offline. At most 500 unread items are kept; the oldest beyond that are dropped (they stay marked as seen and never come back).
 
 ### Live streams
@@ -138,7 +138,7 @@ interval=30
 alerts=true
 
 [highlight]
-# Words that make a news item pulse in the popup (default: breaking)
+# Words that make a news item pulse when they appear in its title or one of its categories (default: breaking)
 breaking|urgent
 
 [network]

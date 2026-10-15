@@ -13,7 +13,7 @@ from ..config import (
 from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN_PX
 from ..desktop import edit_file_externally, is_fullscreen_active, run_launcher_command
 from ..playback import open_twitch_stream, open_youtube_stream
-from ..rules import feed_source_url, item_detail_text, title_is_highlighted
+from ..rules import feed_source_url, item_detail_text, item_is_highlighted
 from .timer import TIMER_RESERVED_HEIGHT_PX, format_timer_countdown
 
 
@@ -590,7 +590,7 @@ class PopupMixin:
         if tooltip:
             row.set_tooltip_text(tooltip)
             label.set_tooltip_text(tooltip)
-        if title_is_highlighted(full_title, self._highlight_words):
+        if item_is_highlighted(entry, self._highlight_words):
             self._breaking_rows.append(row)
             self._apply_breaking_state()
 

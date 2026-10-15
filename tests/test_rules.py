@@ -233,6 +233,28 @@ class TestBreakingHighlight(TmpConfigCase):
         self.assertTrue(rt.title_is_highlighted('Ultimă oră: incendiu', ('ultima ora',)))
         self.assertFalse(rt.title_is_highlighted('Ultima orasului', ('ultima ora',)))
 
+    WORDS = ('breaking', 'ultima ora')
+
+    def test_item_highlighted_by_its_title(self):
+        self.assertTrue(rt.item_is_highlighted({'title': 'Breaking: flood', 'tags': ['Weather']}, self.WORDS))
+
+    def test_item_highlighted_by_a_category_alone(self):
+        self.assertTrue(rt.item_is_highlighted({'title': 'Flood in the valley', 'tags': ['Weather', 'Breaking News']}, self.WORDS))
+        self.assertTrue(rt.item_is_highlighted({'title': 'Flood', 'tags': ['BREAKING']}, self.WORDS))
+
+    def test_category_matching_is_whole_word_ignoring_case_and_accents(self):
+        self.assertTrue(rt.item_is_highlighted({'title': 'x', 'tags': ['Ultim\u0103 Or\u0103']}, self.WORDS))
+        self.assertFalse(rt.item_is_highlighted({'title': 'x', 'tags': ['Outbreaking', 'Breakingly']}, self.WORDS))
+
+    def test_item_without_a_match_or_without_tags_is_not_highlighted(self):
+        self.assertFalse(rt.item_is_highlighted({'title': 'Quiet day', 'tags': ['Sport']}, self.WORDS))
+        self.assertFalse(rt.item_is_highlighted({'title': 'Quiet day'}, self.WORDS))
+        self.assertFalse(rt.item_is_highlighted({'title': 'Quiet day', 'tags': None}, self.WORDS))
+
+    def test_non_text_tags_are_ignored_and_no_words_highlights_nothing(self):
+        self.assertFalse(rt.item_is_highlighted({'title': 'x', 'tags': [None, 5, {}]}, self.WORDS))
+        self.assertFalse(rt.item_is_highlighted({'title': 'Breaking', 'tags': ['Breaking']}, ()))
+
 
 class TestMiddleClickFeedTitle(unittest.TestCase):
     class Stub:
