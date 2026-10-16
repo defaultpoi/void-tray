@@ -39,6 +39,43 @@ def topgrade_command(steps):
     return command + ['--yes', '--no-retry', '--no-self-update', '--skip-notify']
 
 
+_PKGVER_RE = re.compile(r'^(?P<name>\S+)-[^\s-]+_\d+$')
+
+
+def parse_orphans(output):
+    """Sorted package names from `xbps-query -O` output, which prints one pkgver
+    (name-version_revision) per line. Anything that is not a pkgver is ignored."""
+    names = set()
+    for line in output.splitlines():
+        parts = line.split()
+        match = _PKGVER_RE.match(parts[0]) if parts else None
+        if match:
+            names.add(match.group('name'))
+    return sorted(names)
+
+
+def list_orphans():
+    """Packages installed as dependencies that nothing requires any more, from
+    `xbps-query -O`: read-only, no root needed. Returns the sorted names ([] when
+    there are none), or None if the query failed."""
+    try:
+        proc = subprocess.Popen(
+            ['xbps-query', '-O'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True
+        )
+        try:
+            out, _err = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            return None
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return parse_orphans(out or '')
+
+
 def parse_xbps_updates(output):
     """Pure parser for `xbps-install -Mn -u` output: returns the pkgnames whose
     action is 'update'. Lines look like

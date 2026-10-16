@@ -96,6 +96,8 @@ def ensure_config():
             "# steps= topgrade steps to run, e.g. system, flatpak (default: system, which\n"
             "# is xbps-install -Su xbps then -u). `all` runs every step topgrade finds;\n"
             "# a step that needs a sudo password fails instead of asking.\n"
+            "# orphans=false hides the row that offers to remove orphaned packages (those\n"
+            "# installed as dependencies that nothing needs any more, `xbps-query -O`).\n"
             "\n"
             "[highlight]\n"
             "# News items whose title or categories contain one of these words pulse in\n"
@@ -385,6 +387,16 @@ def load_updates_installer():
             else:
                 steps = tuple(dict.fromkeys(n for n in names if TOPGRADE_STEP_RE.match(n))) or DEFAULT_TOPGRADE_STEPS
     return installer, steps
+
+
+def load_orphan_nudge():
+    """[updates] orphans= switch for the orphaned-packages row; on unless it is
+    0, false, no or off."""
+    for line in _read_config_sections()['updates']:
+        key, sep, val = line.partition('=')
+        if sep and key.strip().lower() == 'orphans':
+            return val.split('#', 1)[0].strip().lower() not in ('0', 'false', 'no', 'off')
+    return True
 
 
 DEFAULT_TIMER_MAX_MINUTES = 120

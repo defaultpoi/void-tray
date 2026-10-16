@@ -7,17 +7,18 @@ import threading
 import time as time_module
 
 from ..gi_env import GLib
-from ..config import load_updates_check_interval, load_updates_installer
+from ..config import load_orphan_nudge, load_updates_check_interval, load_updates_installer
 from ..log import _log
 from ..proc import _kill_process_group
 from ..state import save_state
-from ..updates import choose_installer, get_installed_version, list_all_updates, topgrade_command
+from ..updates import choose_installer, get_installed_version, list_all_updates, list_orphans, topgrade_command
 
 
 PRIVILEGE_CMD = ['sudo', '-n']  # -n: fail fast rather than hang if a password would be needed;
 
 
 UPDATE_TIMEOUT_SECONDS = 1800  # 30 minutes
+ORPHAN_STATUS_CLEAR_MS = 4000  # how long Done/Failed stays on the orphaned-packages row
 
 
 def _run_install_command(cmd, on_status, shown='Installing…'):
@@ -27,6 +28,7 @@ def _run_install_command(cmd, on_status, shown='Installing…'):
     (exit code, last output lines); the exit code is -1 if it could not run."""
     returncode = -1
     watchdog = None
+    proc = None
     tail = collections.deque(maxlen=5)
     try:
         proc = subprocess.Popen(
@@ -64,6 +66,9 @@ def _run_install_command(cmd, on_status, shown='Installing…'):
     finally:
         if watchdog is not None:
             watchdog.cancel()
+        close = getattr(getattr(proc, 'stdout', None), 'close', None)
+        if close is not None:
+            close()  # reading to EOF does not close the pipe
     return returncode, list(tail)
 
 
@@ -120,6 +125,8 @@ class UpdatesMixin:
     def _end_install(self):
         self.active_installs = max(0, self.active_installs - 1)
         self.update_icon()
+        # an upgrade can leave old dependencies behind as orphans: look again
+        threading.Thread(target=self.check_orphans_if_due, kwargs={'force': True}, daemon=True).start()
 
     def install_all_updates(self):
         if self.active_installs > 0:
@@ -149,6 +156,81 @@ class UpdatesMixin:
         self.install_status.pop(pkgname, None)
         self.update_icon()
         self.refresh_list()
+        return False
+
+    def check_orphans_if_due(self, force=False):
+        """Looks for orphaned packages (`xbps-query -O`, no root) on the update
+        scan's schedule, and keeps the previous list when the query fails."""
+        if not load_orphan_nudge():
+            return
+        now = time_module.time()
+        with self.lock:
+            last = self.state.get('orphans_last_checked', 0)
+        if not force and (now - last) < load_updates_check_interval():
+            return
+        if not self._xbps_lock.acquire(blocking=False):
+            return  # an install or removal is running: the list would be wrong mid-transaction
+        try:
+            names = list_orphans()
+        finally:
+            self._xbps_lock.release()
+        with self.lock:
+            changed = names is not None and names != self.state.get('orphans', [])
+            if names is not None:
+                self.state['orphans'] = names
+            self.state['orphans_last_checked'] = now  # a failed query also waits a full interval
+            save_state(self.state)
+        if changed:
+            GLib.idle_add(self._orphans_changed)
+
+    def _orphans_changed(self):
+        if self.popup is not None and self.popup.get_visible():
+            self.refresh_list(keep_open=True)  # a scan finishing must not close a popup someone is reading
+        return False
+
+    def remove_orphans(self, clean_cache=False):
+        if self.active_installs > 0:
+            return  # an install or removal is already running
+        self.orphan_status = 'Removing…'
+        self._begin_install()
+        threading.Thread(target=self._run_orphan_removal, args=(clean_cache,), daemon=True).start()
+
+    def _run_orphan_removal(self, clean_cache):
+        """`sudo -n xbps-remove -o -y`, then `-O -y` for the cache when asked.
+        Exactly these argument lists, so a sudoers rule can allow them and nothing
+        broader. Afterwards the list is read again: removing orphans can orphan
+        their dependencies, and those are shown for the next round."""
+        commands = [PRIVILEGE_CMD + ['xbps-remove', '-o', '-y']]
+        if clean_cache:
+            commands.append(PRIVILEGE_CMD + ['xbps-remove', '-O', '-y'])
+        status = 'Done'
+        with self._xbps_lock:
+            for cmd in commands:
+                returncode, tail = _run_install_command(cmd, lambda _status: None)
+                if returncode != 0:
+                    _log(f"{' '.join(cmd)} exited with {returncode}: " + ' | '.join(tail))
+                    status = 'Failed'
+                    break
+            remaining = list_orphans()
+        with self.lock:
+            if remaining is not None:
+                self.state['orphans'] = remaining
+            self.state['orphans_last_checked'] = time_module.time()
+            save_state(self.state)
+        GLib.idle_add(self._finish_orphan_removal, status)
+
+    def _finish_orphan_removal(self, status):
+        self.active_installs = max(0, self.active_installs - 1)
+        self.orphan_status = status
+        self.update_icon()
+        self.refresh_list()
+        GLib.timeout_add(ORPHAN_STATUS_CLEAR_MS, self._clear_orphan_status)
+        return False
+
+    def _clear_orphan_status(self):
+        self.orphan_status = None
+        if self.popup is not None:
+            self.refresh_list()
         return False
 
     def _set_all_status(self, pkgnames, status):

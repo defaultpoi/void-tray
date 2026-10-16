@@ -30,6 +30,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 ### Package updates
 
 - **Void package updates:** a system-wide `xbps-install -Mn -u` dry run twice a day by default (`interval=<hours>` in `[updates]`). Click the "Updates available" header to install everything. With [topgrade](https://github.com/topgrade-rs/topgrade) installed that is one run of its `system` step (on Void: `xbps-install -Su xbps`, then `xbps-install -u`) plus any other steps you list under `steps=`; every row shows the same live status and counts as done when its installed version changed. Without topgrade (or with `installer=xbps`) it installs one package at a time, each with its own status. A scan is skipped while an install is running. Scanning always uses the xbps dry run: topgrade can run updates but cannot list what is pending.
+- **Orphaned packages:** on the same cycle as the update scan, when the popup is opened by hand and after an install finishes, `xbps-query -O` (no root needed) lists packages installed as dependencies that nothing needs any more. When there are some, an "N orphaned packages" row appears below the updates. Click it to get **Remove** (`sudo -n xbps-remove -o -y`), **Remove and clean the package cache** (also `xbps-remove -O -y`) and **Cancel**, with the packages that would go listed underneath; nothing is removed until you pick a Remove row, and the result shows on the row for a few seconds. To keep a package, mark it with `xbps-pkgdb -m manual <name>`. The row never counts in the tray badge, changes the icon colour, plays a sound or opens the popup by itself, and `orphans=false` in `[updates]` hides it.
 
 ### Tools
 
@@ -156,6 +157,8 @@ interval=12
 # topgrade finds, and a step that needs a sudo password fails instead of asking
 installer=auto
 steps=system
+# orphans=false hides the row that offers to remove orphaned packages
+orphans=true
 
 [actions]
 # Label|command lines the timer's Schedule mode can run (the built-in default,
@@ -257,6 +260,12 @@ YOUR_USER ALL=(root) NOPASSWD: /usr/bin/xbps-install -Su -y *
 The `zz-` prefix matters: sudoers uses the last matching rule, so the file must sort after anything that might override it.
 
 **Security note:** the xbps rule lets any process running as your user run `xbps-install -Su -y` (and so install any package) as root without a password, not just this app. The topgrade rule is much narrower, which is a reason to prefer it.
+
+**Removing orphaned packages** runs `sudo -n xbps-remove -o -y` and, with the cache option, `sudo -n xbps-remove -O -y`. Without a rule they fail at once and the row shows "Failed". One command that writes a rule for exactly those two:
+
+```bash
+t=$(mktemp) && echo "$USER ALL=(root) NOPASSWD: /usr/bin/xbps-remove -o -y, /usr/bin/xbps-remove -O -y" > "$t" && sudo visudo -cf "$t" && sudo install -m 440 -o root -g root "$t" /etc/sudoers.d/zz-void-tray-remove; rm -f "$t"
+```
 
 To run every topgrade step interactively, put it in the Launch list, for example `Topgrade|xfce4-terminal -e topgrade` under `[launcher]`.
 

@@ -28,6 +28,10 @@ def load_state():
         state['unread'] = []
     if not isinstance(state.get('available_updates'), list):
         state['available_updates'] = []
+    if isinstance(state.get('orphans'), list):
+        state['orphans'] = [name for name in state['orphans'] if isinstance(name, str)]
+    else:
+        state['orphans'] = []
     if not isinstance(state.get('live_channels'), list):
         state['live_channels'] = []
     if not isinstance(state.get('live_youtube_channels'), list):

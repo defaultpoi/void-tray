@@ -254,6 +254,29 @@ class TestUpdatesInstaller(TmpConfigCase):
         self.assertEqual(rt.load_updates_installer(), ('auto', ('system',)))
 
 
+class TestOrphanNudgeSetting(TmpConfigCase):
+    def test_on_by_default(self):
+        self.assertTrue(rt.load_orphan_nudge())
+        self.conf('[updates]\ninterval=6\n')
+        self.assertTrue(rt.load_orphan_nudge())
+
+    def test_switched_off_by_any_of_the_usual_words(self):
+        for value in ('false', 'FALSE', 'no', 'off', '0', 'false # not wanted'):
+            self.conf('[updates]\norphans=%s\n' % value)
+            self.assertFalse(rt.load_orphan_nudge(), value)
+
+    def test_explicitly_on(self):
+        for value in ('true', 'yes', 'on', '1', 'anything-else'):
+            self.conf('[updates]\norphans=%s\n' % value)
+            self.assertTrue(rt.load_orphan_nudge(), value)
+
+    def test_new_configs_document_the_key(self):
+        rt.ensure_config()
+        with open(rt.CONFIG_FILE) as f:
+            self.assertIn('# orphans=false', f.read())
+        self.assertTrue(rt.load_orphan_nudge())
+
+
 class TestLiveCheckIntervals(TmpConfigCase):
     def test_defaults_without_setting(self):
         self.conf('[twitch]\nchan\n[youtube]\n@h\n')

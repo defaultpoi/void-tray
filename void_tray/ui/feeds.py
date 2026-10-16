@@ -59,6 +59,7 @@ class FeedsMixin:
         try:
             self.check_feeds(force)
             self.check_updates_if_due(force=force)
+            self.check_orphans_if_due(force=force)
         finally:
             self._check_lock.release()
 

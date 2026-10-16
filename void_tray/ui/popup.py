@@ -1,5 +1,6 @@
 """The popup window and its list."""
 
+import threading
 import webbrowser
 
 from ..gi_env import GLib, Gdk, Gtk, Pango
@@ -8,6 +9,7 @@ from ..config import (
     load_highlight_words,
     load_launcher_entries,
     load_network_reset_command,
+    load_orphan_nudge,
     load_timer_settings,
 )
 from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN_PX
@@ -33,6 +35,7 @@ LAUNCHER_MAX_HEIGHT_PX = 300  # the Launch list scrolls beyond this
 
 
 LIST_BOTTOM_SPACE_PX = 85  # reserved under the last row for the timer slide (countdown mode)
+ORPHAN_LIST_MAX_NAMES = 30  # package names listed under an expanded orphaned-packages header
 
 
 POPUP_CSS = """
@@ -359,7 +362,10 @@ class PopupMixin:
             self.list_spacer = self.schedule_banner = self.schedule_banner_label = None
             self.mode_buttons = {}
         self.weather_view = 'today'
+        self.orphans_expanded = False
         self.probe_connectivity()  # fresh answer for the indicator while the popup is open
+        if not auto:  # the orphaned-packages list is cheap to refresh and must be current before anyone removes from it
+            threading.Thread(target=self.check_orphans_if_due, kwargs={'force': True}, daemon=True).start()
         self.build_popup_window()
         self._update_scroller_max_height()
         self.refresh_list()
@@ -400,7 +406,10 @@ class PopupMixin:
             self._apply_breaking_state()
         return True
 
-    def refresh_list(self):
+    def refresh_list(self, keep_open=False):
+        """Rebuilds the list. With nothing to show a visible popup closes itself,
+        unless keep_open is set (refreshes the person did not ask for, such as a
+        finished orphan scan) or an orphan removal is showing its result."""
         self._breaking_rows = []
         self._highlight_words = load_highlight_words()
         for child in self.listbox.get_children():
@@ -408,16 +417,21 @@ class PopupMixin:
         with self.lock:
             unread = list(self.state.get('unread', []))
             available = list(self.state.get('available_updates', []))
+            orphans = list(self.state.get('orphans', []))
             live_channels = list(self.state.get('live_channels', []))
             live_youtube_channels = list(self.state.get('live_youtube_channels', []))
 
         feeds_map = {url: (custom_name or url) for url, custom_name, _interval in load_feeds()}
+        # orphaned packages never keep the popup open or fill it on their own: they are
+        # shown below whatever else there is, and when the popup is opened by hand
+        show_orphans = load_orphan_nudge() and bool(orphans or self.orphan_status)
 
         any_live = bool(live_channels or live_youtube_channels)
         truly_empty = not unread and not available and not any_live
         only_live_remains = (not unread and not available) and any_live
         popup_already_visible = bool(self.popup and self.popup.get_visible())
         should_hide = truly_empty or (only_live_remains and popup_already_visible)
+        close_popup = should_hide and not keep_open and not self.orphan_status
 
         if should_hide:
             row = Gtk.ListBoxRow()
@@ -428,7 +442,9 @@ class PopupMixin:
             lbl.set_margin_bottom(8)
             row.add(lbl)
             self.listbox.add(row)
-            if self.popup:
+            if show_orphans:
+                self.add_orphan_rows(orphans, is_first=False)
+            if self.popup and close_popup:
                 self.popup.hide()
         else:
             is_first_section = True
@@ -486,12 +502,73 @@ class PopupMixin:
                     lbl = Gtk.Label(label=f"... and {len(available) - MAX_LIST_ITEMS} more")
                     row.add(lbl)
                     self.listbox.add(row)
+            if show_orphans:
+                self.add_orphan_rows(orphans, is_first=is_first_section)
         self.listbox.show_all()
 
-    def build_header_row(self, feed_url, feed_name, is_first=False, clickable=True, install_all=False):
+    def add_orphan_rows(self, orphans, is_first=False):
+        """The orphaned-packages header and, once it has been clicked, the choices
+        under it: Remove, Remove and clean the cache, Cancel, then what would go.
+        They are plain list rows, so a short popup cannot clip them."""
+        self.listbox.add(self.build_orphans_header(orphans, is_first=is_first))
+        if not self.orphans_expanded or self.orphan_status or not orphans:
+            return
+        for text, action in ((f"Remove {self._plural(len(orphans), 'package')}", 'remove'),
+                             ('Remove and clean the package cache', 'remove_cache'),
+                             ('Cancel', 'cancel')):
+            row = Gtk.ListBoxRow()
+            row.set_selectable(False)
+            row.set_activatable(True)
+            row.orphans_action = action
+            label = Gtk.Label()
+            label.set_markup(f'<b>{GLib.markup_escape_text(text)}</b>' if action == 'remove' else GLib.markup_escape_text(text))
+            label.set_margin_top(3)
+            label.set_margin_bottom(3)
+            row.add(label)
+            self.listbox.add(row)
+        shown = orphans[:ORPHAN_LIST_MAX_NAMES]
+        for name in shown:
+            self.listbox.add(self._orphan_info_row(GLib.markup_escape_text(name)))
+        if len(orphans) > len(shown):
+            self.listbox.add(self._orphan_info_row(f"... and {len(orphans) - len(shown)} more"))
+        self.listbox.add(self._orphan_info_row('<small>To keep one: xbps-pkgdb -m manual &lt;name&gt;</small>'))
+
+    @staticmethod
+    def _plural(count, noun):
+        return f"{count} {noun}{'s' if count != 1 else ''}"
+
+    def _orphan_info_row(self, markup):
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
-        row.set_activatable(clickable or install_all)
+        row.set_activatable(False)
+        label = Gtk.Label()
+        label.set_markup(markup)
+        label.set_xalign(0)
+        label.set_margin_start(12)
+        row.add(label)
+        return row
+
+    def build_orphans_header(self, orphans, is_first=False):
+        """The "N orphaned packages" section header; clicking it opens the confirmation
+        popover. While a removal runs or just finished it shows that status instead."""
+        count = len(orphans)
+        if self.orphan_status:
+            title = f"Orphaned packages · {self.orphan_status}"
+        else:
+            title = f"{self._plural(count, 'orphaned package')}"
+        row = self.build_header_row('__orphans__', title, is_first=is_first, clickable=False, orphans=True)
+        shown = orphans[:15]
+        listing = '\n'.join(shown) + (f"\n... and {count - len(shown)} more" if count > len(shown) else '')
+        row.set_tooltip_text("Packages installed as dependencies that nothing needs any more. Click to review and remove them."
+                             + (f"\n\n{listing}" if listing else ''))
+        return row
+
+    def build_header_row(self, feed_url, feed_name, is_first=False, clickable=True, install_all=False, orphans=False):
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(clickable or install_all or orphans)
+        if orphans:
+            row.orphans_header = True
         if install_all:
             row.install_all_header = True
             row.set_tooltip_text("Install all available updates")
@@ -629,6 +706,19 @@ class PopupMixin:
         return False
 
     def on_row_activated(self, _listbox, row):
+        if getattr(row, 'orphans_header', False):  # these work offline: nothing here needs the network
+            if self.active_installs == 0 and not self.orphan_status:
+                self.orphans_expanded = not self.orphans_expanded
+                self.refresh_list(keep_open=True)
+            return
+        action = getattr(row, 'orphans_action', None)
+        if action:
+            self.orphans_expanded = False
+            if action == 'cancel':
+                self.refresh_list(keep_open=True)
+            else:
+                self.remove_orphans(clean_cache=(action == 'remove_cache'))
+            return
         if not self.online and (getattr(row, 'install_all_header', False)
                                 or hasattr(row, 'header_feed_url') or hasattr(row, 'entry_id')
                                 or hasattr(row, 'twitch_channel') or hasattr(row, 'youtube_channel')):
