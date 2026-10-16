@@ -1,6 +1,7 @@
-"""Package updates: the xbps dry run and its parser."""
+"""Package updates: the xbps dry run and its parser, and the install commands."""
 
 import re
+import shutil
 import subprocess
 
 from .proc import _kill_process_group
@@ -17,6 +18,25 @@ def get_installed_version(pkgname):
     except Exception:
         pass
     return None
+
+
+def choose_installer(setting):
+    """'topgrade' or 'xbps' for the [updates] installer= setting; auto means
+    topgrade when it is on the PATH."""
+    if setting == 'auto':
+        return 'topgrade' if shutil.which('topgrade') else 'xbps'
+    return setting
+
+
+def topgrade_command(steps):
+    """The unattended topgrade command line for `steps` (None = every step):
+    --yes answers the package manager's prompts, --no-retry stops it asking
+    whether to retry a failed step, --no-self-update leaves topgrade itself to
+    xbps, --skip-notify skips its desktop notification."""
+    command = ['topgrade']
+    if steps:
+        command += ['--only', *steps]
+    return command + ['--yes', '--no-retry', '--no-self-update', '--skip-notify']
 
 
 def parse_xbps_updates(output):

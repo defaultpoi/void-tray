@@ -9,6 +9,101 @@ from facade import rt
 from helpers import TmpConfigCase
 
 
+class TestRunTopgrade(unittest.TestCase):
+    class Stub:
+        _run_update_all = rt.RssTray._run_update_all
+        _run_topgrade = rt.RssTray._run_topgrade
+
+        def __init__(self):
+            self._xbps_lock = rt.threading.Lock()
+            self.statuses = []
+            self.all_statuses = []
+            self.ended = False
+
+        def _set_status(self, pkg, status):
+            self.statuses.append((pkg, status))
+
+        def _set_all_status(self, pkgs, status):
+            self.all_statuses.append((tuple(pkgs), status))
+
+        def _finalize_package_removal(self, pkg):
+            pass
+
+        def _end_install(self):
+            self.ended = True
+
+    def _run(self, pkgnames, versions, returncode=0, lines=(), installer=('topgrade', ('system',)), popen_error=None):
+        stub = self.Stub()
+        proc = mock.MagicMock()
+        proc.stdout = iter(lines)
+        proc.returncode = returncode
+        popen = mock.Mock(return_value=proc, side_effect=popen_error)
+        with mock.patch.object(rt, 'get_installed_version', side_effect=versions), \
+                mock.patch.object(rt.subprocess, 'Popen', popen), \
+                mock.patch.object(rt.threading, 'Timer'), \
+                mock.patch.object(rt, '_log') as log, \
+                mock.patch.object(rt, 'GLib') as glib, \
+                mock.patch.object(rt, 'load_updates_installer', return_value=installer), \
+                mock.patch.object(rt.shutil, 'which', return_value=None):
+            stub._run_update_all(pkgnames)
+        stub.ended = any(call.args == (stub._end_install,) for call in glib.idle_add.call_args_list)
+        return stub, popen, log
+
+    def test_one_topgrade_run_replaces_the_per_package_installs(self):
+        stub, popen, _ = self._run(['a', 'b'], ['1', '1', '2', '2'])
+        self.assertEqual(popen.call_count, 1)
+        cmd = popen.call_args[0][0]
+        self.assertEqual(cmd, ['topgrade', '--only', 'system', '--yes', '--no-retry', '--no-self-update', '--skip-notify'])
+
+    def test_no_privilege_command_is_prepended_because_topgrade_runs_sudo_itself(self):
+        with mock.patch.object(rt, 'PRIVILEGE_CMD', ['sudo', '-n']):
+            _, popen, _ = self._run(['a'], ['1', '2'])
+        self.assertEqual(popen.call_args[0][0][0], 'topgrade')
+
+    def test_it_never_reads_the_terminal(self):
+        _, popen, _ = self._run(['a'], ['1', '2'])
+        self.assertIs(popen.call_args[1]['stdin'], rt.subprocess.DEVNULL)
+        self.assertTrue(popen.call_args[1]['start_new_session'])
+
+    def test_configured_steps_are_passed_through_and_all_means_no_only_flag(self):
+        _, popen, _ = self._run(['a'], ['1', '2'], installer=('topgrade', ('system', 'flatpak')))
+        self.assertEqual(popen.call_args[0][0][:5], ['topgrade', '--only', 'system', 'flatpak', '--yes'])
+        _, popen, _ = self._run(['a'], ['1', '2'], installer=('topgrade', None))
+        self.assertNotIn('--only', popen.call_args[0][0])
+
+    def test_every_row_shows_updating_then_follows_the_xbps_headers(self):
+        stub, _, _ = self._run(['a', 'b'], ['1', '1', '2', '2'],
+                               lines=['\n', '[*] Downloading packages\n', 'x\n', '[*] Unpacking packages\n', '[*] Configuring\n'])
+        self.assertEqual([s for _, s in stub.all_statuses],
+                         ['Updating…', 'Downloading…', 'Installing…'])
+        self.assertTrue(all(pkgs == ('a', 'b') for pkgs, _ in stub.all_statuses))
+
+    def test_a_package_is_done_when_its_version_changed(self):
+        stub, _, _ = self._run(['a', 'b'], ['1', '1', '2', '2'])
+        self.assertEqual(stub.statuses, [('a', 'Done'), ('b', 'Done')])
+        self.assertTrue(stub.ended)
+
+    def test_a_package_whose_version_did_not_change_failed(self):
+        stub, _, _ = self._run(['a', 'held'], ['1', '1', '2', '1'])
+        self.assertEqual(stub.statuses, [('a', 'Done'), ('held', 'Failed')])
+
+    def test_a_late_failing_step_does_not_undo_packages_that_did_update(self):
+        stub, _, log = self._run(['a'], ['1', '2'], returncode=1, lines=['sudo: a password is required\n'])
+        self.assertEqual(stub.statuses, [('a', 'Done')])
+        self.assertIn('password is required', log.call_args[0][0])  # the last output lines go to the debug log
+
+    def test_topgrade_missing_marks_everything_failed_and_still_ends_the_install(self):
+        stub, _, log = self._run(['a', 'b'], ['1', '1', '1', '1'], popen_error=FileNotFoundError('topgrade'))
+        self.assertEqual(stub.statuses, [('a', 'Failed'), ('b', 'Failed')])
+        self.assertTrue(stub.ended)
+        self.assertIn('-1', log.call_args[0][0])
+
+    def test_xbps_is_used_when_asked_for_or_when_topgrade_is_not_installed(self):
+        for installer in (('xbps', ('system',)), ('auto', ('system',))):
+            stub, popen, _ = self._run(['a'], ['1', '1', '2'], installer=installer)
+            self.assertEqual(popen.call_args[0][0][-4:], ['xbps-install', '-Su', '-y', 'a'], installer)
+
+
 class TestRunUpdateAll(unittest.TestCase):
     class Stub:
         _run_update_all = rt.RssTray._run_update_all
@@ -35,6 +130,7 @@ class TestRunUpdateAll(unittest.TestCase):
         with mock.patch.object(rt, 'get_installed_version', side_effect=versions), \
                 mock.patch.object(rt.subprocess, 'Popen', return_value=proc) as popen, \
                 mock.patch.object(rt.threading, 'Timer'), \
+                mock.patch.object(rt, 'load_updates_installer', return_value=('xbps', ('system',))), \
                 mock.patch.object(rt, 'PRIVILEGE_CMD', []):
             stub._run_update_all(pkgnames)
         return stub, popen
@@ -246,7 +342,8 @@ class TestInstallStatusUpdates(TestRunUpdateAll):
         proc.returncode = 0
         with mock.patch.object(rt, 'get_installed_version', side_effect=['v1', 'v1', 'v2']), \
                 mock.patch.object(rt.subprocess, 'Popen', return_value=proc), \
-                mock.patch.object(rt.threading, 'Timer'), mock.patch.object(rt, 'PRIVILEGE_CMD', []):
+                mock.patch.object(rt.threading, 'Timer'), mock.patch.object(rt, 'PRIVILEGE_CMD', []), \
+                mock.patch.object(rt, 'load_updates_installer', return_value=('xbps', ('system',))):
             stub._run_update_all(['pkg'])
         statuses = [s for p, s in stub.statuses]
         self.assertEqual(statuses, ['Installing…', 'Downloading…', 'Installing…', 'Done'])

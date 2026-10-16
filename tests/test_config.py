@@ -212,6 +212,48 @@ class TestIntervalDefaults(TmpConfigCase):
         self.assertEqual(rt.load_updates_check_interval(), 12 * 3600)
 
 
+class TestUpdatesInstaller(TmpConfigCase):
+    def test_defaults_are_auto_and_the_system_step(self):
+        self.assertEqual(rt.load_updates_installer(), ('auto', ('system',)))
+        self.conf('[updates]\ninterval=6\n')
+        self.assertEqual(rt.load_updates_installer(), ('auto', ('system',)))
+
+    def test_installer_choices_and_unknown_values(self):
+        for value in ('auto', 'topgrade', 'xbps'):
+            self.conf('[updates]\ninstaller=%s\n' % value)
+            self.assertEqual(rt.load_updates_installer()[0], value)
+        self.conf('[updates]\ninstaller = TopGrade # comment\n')
+        self.assertEqual(rt.load_updates_installer()[0], 'topgrade')
+        self.conf('[updates]\ninstaller=apt\n')
+        self.assertEqual(rt.load_updates_installer()[0], 'auto')
+
+    def test_steps_accept_commas_pipes_and_spaces_without_duplicates(self):
+        self.conf('[updates]\nsteps=System, flatpak|cargo  system\n')
+        self.assertEqual(rt.load_updates_installer()[1], ('system', 'flatpak', 'cargo'))
+
+    def test_names_that_are_not_plain_identifiers_are_dropped(self):
+        self.conf('[updates]\nsteps=sys;tem, rustup, --yes, $(x)\n')
+        self.assertEqual(rt.load_updates_installer()[1], ('rustup',))
+
+    def test_nothing_usable_falls_back_to_the_system_step(self):
+        self.conf('[updates]\nsteps=\n')
+        self.assertEqual(rt.load_updates_installer()[1], ('system',))
+        self.conf('[updates]\nsteps=;;, ||\n')
+        self.assertEqual(rt.load_updates_installer()[1], ('system',))
+
+    def test_all_means_every_step(self):
+        self.conf('[updates]\nsteps=all\n')
+        self.assertIsNone(rt.load_updates_installer()[1])
+
+    def test_new_configs_document_both_keys_and_still_parse(self):
+        rt.ensure_config()
+        with open(rt.CONFIG_FILE) as f:
+            text = f.read()
+        self.assertIn('# installer=', text)
+        self.assertIn('# steps=', text)
+        self.assertEqual(rt.load_updates_installer(), ('auto', ('system',)))
+
+
 class TestLiveCheckIntervals(TmpConfigCase):
     def test_defaults_without_setting(self):
         self.conf('[twitch]\nchan\n[youtube]\n@h\n')

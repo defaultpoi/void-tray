@@ -29,7 +29,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
 ### Package updates
 
-- **Void package updates:** a system-wide `xbps-install -Mn -u` dry run twice a day by default (`interval=<hours>` in `[updates]`). Click the "Updates available" header to install everything, one package at a time, with live status. A scan is skipped while an install is running.
+- **Void package updates:** a system-wide `xbps-install -Mn -u` dry run twice a day by default (`interval=<hours>` in `[updates]`). Click the "Updates available" header to install everything. With [topgrade](https://github.com/topgrade-rs/topgrade) installed that is one run of its `system` step (on Void: `xbps-install -Su xbps`, then `xbps-install -u`) plus any other steps you list under `steps=`; every row shows the same live status and counts as done when its installed version changed. Without topgrade (or with `installer=xbps`) it installs one package at a time, each with its own status. A scan is skipped while an install is running. Scanning always uses the xbps dry run: topgrade can run updates but cannot list what is pending.
 
 ### Tools
 
@@ -50,6 +50,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
 - Python 3, PyGObject (GTK3), pycairo, `feedparser`
 - `xbps-install` / `xbps-query` for update detection (Void Linux only)
+- `topgrade` (optional, `sudo xbps-install topgrade`) to install updates with it; see [Passwordless updates](#passwordless-updates-optional)
 - `streamlink` and `mpv` for Twitch and YouTube Live streams
 - A command-line audio player for the notification sound
 
@@ -149,6 +150,12 @@ reset=~/.local/bin/reset-network.sh
 [updates]
 # interval=<hours> between package update scans (default 12, minimum 1)
 interval=12
+# installer= what Install all runs: auto (topgrade if it is installed, else xbps-install;
+# the default), topgrade or xbps
+# steps= topgrade steps to run, comma-separated (default: system); `all` runs every step
+# topgrade finds, and a step that needs a sudo password fails instead of asking
+installer=auto
+steps=system
 
 [actions]
 # Label|command lines the timer's Schedule mode can run (the built-in default,
@@ -227,7 +234,17 @@ A schedule limits live checks to the times a channel is expected to stream, so y
 
 ## Passwordless updates (optional)
 
-Installs run `sudo -n xbps-install -Su -y <pkg>`, which fails immediately if a password would be needed. To allow it without a password, add a scoped rule:
+Nothing in a tray app can type a password, so installs must be allowed in sudoers or they fail immediately.
+
+**With topgrade** (the default once it is installed) the `system` step runs `sudo xbps-install -Su xbps -y` and then `sudo xbps-install -u -y`. One command that writes a rule for exactly those two, checks it with `visudo` and only then installs it:
+
+```bash
+t=$(mktemp) && echo "$USER ALL=(root) NOPASSWD: /usr/bin/xbps-install -Su xbps -y, /usr/bin/xbps-install -u -y" > "$t" && sudo visudo -cf "$t" && sudo install -m 440 -o root -g root "$t" /etc/sudoers.d/zz-void-tray; rm -f "$t"
+```
+
+This rule only allows upgrading what is already installed; it cannot install arbitrary packages. Other steps (for example a system-wide flatpak update) need their own rule, or they fail instead of asking. If `doas` is installed, topgrade prefers it over `sudo`; set `sudo_command = "sudo"` under `[misc]` in `~/.config/topgrade.toml` to pin it.
+
+**Without topgrade** (`installer=xbps`, or topgrade is not installed) installs run `sudo -n xbps-install -Su -y <pkg>`, which fails immediately if a password would be needed. Allow it with a scoped rule:
 
 ```bash
 sudo visudo -f /etc/sudoers.d/zz-void-tray
@@ -237,9 +254,11 @@ sudo visudo -f /etc/sudoers.d/zz-void-tray
 YOUR_USER ALL=(root) NOPASSWD: /usr/bin/xbps-install -Su -y *
 ```
 
-The `zz-` prefix matters: sudoers uses the last matching rule, so this file must sort after anything that might override it.
+The `zz-` prefix matters: sudoers uses the last matching rule, so the file must sort after anything that might override it.
 
-**Security note:** this lets any process running as your user run `xbps-install -Su -y` as root without a password, not just this app.
+**Security note:** the xbps rule lets any process running as your user run `xbps-install -Su -y` (and so install any package) as root without a password, not just this app. The topgrade rule is much narrower, which is a reason to prefer it.
+
+To run every topgrade step interactively, put it in the Launch list, for example `Topgrade|xfce4-terminal -e topgrade` under `[launcher]`.
 
 ## Design notes
 

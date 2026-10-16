@@ -1,6 +1,7 @@
 """config.conf: creating it, reading every section, and the single writer."""
 
 import os
+import re
 import shutil
 
 from .constants import CONFIG_DIR, CONFIG_FILE, DEFAULT_HIGHLIGHT_WORDS, LEGACY_CONFIG_DIR
@@ -89,6 +90,12 @@ def ensure_config():
             "\n"
             "[updates]\n"
             "# interval=<hours> between package update scans (default 12, minimum 1).\n"
+            "# installer= what Install all runs: auto (topgrade if it is installed, else\n"
+            "# xbps-install; the default), topgrade or xbps. Scanning always uses\n"
+            "# `xbps-install -Mn -u`, because topgrade cannot list pending updates.\n"
+            "# steps= topgrade steps to run, e.g. system, flatpak (default: system, which\n"
+            "# is xbps-install -Su xbps then -u). `all` runs every step topgrade finds;\n"
+            "# a step that needs a sudo password fails instead of asking.\n"
             "\n"
             "[highlight]\n"
             "# News items whose title or categories contain one of these words pulse in\n"
@@ -349,6 +356,35 @@ def load_weather_refresh_interval():
 def load_updates_check_interval():
     """Seconds between package update scans: 'interval=<hours>' in [updates]."""
     return _load_interval('updates', PENDING_CHECK_INTERVAL_SECONDS, MIN_UPDATES_CHECK_HOURS, 3600)
+
+
+UPDATES_INSTALLERS = ('auto', 'topgrade', 'xbps')
+DEFAULT_TOPGRADE_STEPS = ('system',)
+TOPGRADE_STEP_RE = re.compile(r'^[a-z0-9_]+$')
+
+
+def load_updates_installer():
+    """(installer, steps) from [updates]. `installer=` is what Install all runs:
+    auto (topgrade when it is installed, else xbps-install; the default),
+    topgrade or xbps. `steps=` lists the topgrade steps to run, separated by
+    commas, '|' or spaces: names that are not plain lowercase identifiers are
+    dropped, nothing usable gives ('system',), and 'all' gives None, meaning
+    every step topgrade knows (no --only)."""
+    installer, steps = 'auto', DEFAULT_TOPGRADE_STEPS
+    for line in _read_config_sections()['updates']:
+        key, sep, val = line.partition('=')
+        if not sep:
+            continue
+        key, val = key.strip().lower(), val.split('#', 1)[0].strip().lower()
+        if key == 'installer':
+            installer = val if val in UPDATES_INSTALLERS else 'auto'
+        elif key == 'steps':
+            names = [n for n in re.split(r'[,|\s]+', val) if n]
+            if 'all' in names:
+                steps = None
+            else:
+                steps = tuple(dict.fromkeys(n for n in names if TOPGRADE_STEP_RE.match(n))) or DEFAULT_TOPGRADE_STEPS
+    return installer, steps
 
 
 DEFAULT_TIMER_MAX_MINUTES = 120

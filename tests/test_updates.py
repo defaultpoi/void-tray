@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from facade import rt
 
@@ -21,6 +22,36 @@ class TestParseXbpsUpdates(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(rt.parse_xbps_updates(''), [])
+
+
+class TestInstallerChoice(unittest.TestCase):
+    def test_auto_uses_topgrade_when_it_is_installed(self):
+        with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/topgrade'):
+            self.assertEqual(rt.choose_installer('auto'), 'topgrade')
+
+    def test_auto_falls_back_to_xbps_without_topgrade(self):
+        with mock.patch.object(rt.shutil, 'which', return_value=None):
+            self.assertEqual(rt.choose_installer('auto'), 'xbps')
+
+    def test_an_explicit_choice_is_kept_whether_or_not_topgrade_is_installed(self):
+        with mock.patch.object(rt.shutil, 'which', return_value=None):
+            self.assertEqual(rt.choose_installer('topgrade'), 'topgrade')
+        with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/topgrade'):
+            self.assertEqual(rt.choose_installer('xbps'), 'xbps')
+
+
+class TestTopgradeCommand(unittest.TestCase):
+    FLAGS = ['--yes', '--no-retry', '--no-self-update', '--skip-notify']
+
+    def test_the_default_runs_only_the_system_step_unattended(self):
+        self.assertEqual(rt.topgrade_command(('system',)), ['topgrade', '--only', 'system'] + self.FLAGS)
+
+    def test_several_steps_follow_a_single_only(self):
+        self.assertEqual(rt.topgrade_command(('system', 'flatpak')),
+                         ['topgrade', '--only', 'system', 'flatpak'] + self.FLAGS)
+
+    def test_all_steps_means_no_only_flag(self):
+        self.assertEqual(rt.topgrade_command(None), ['topgrade'] + self.FLAGS)
 
 
 if __name__ == '__main__':

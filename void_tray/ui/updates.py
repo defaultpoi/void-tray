@@ -1,21 +1,70 @@
 """Package update scans and install-all."""
 
+import collections
 import hashlib
 import subprocess
 import threading
 import time as time_module
 
 from ..gi_env import GLib
-from ..config import load_updates_check_interval
+from ..config import load_updates_check_interval, load_updates_installer
+from ..log import _log
 from ..proc import _kill_process_group
 from ..state import save_state
-from ..updates import get_installed_version, list_all_updates
+from ..updates import choose_installer, get_installed_version, list_all_updates, topgrade_command
 
 
 PRIVILEGE_CMD = ['sudo', '-n']  # -n: fail fast rather than hang if a password would be needed;
 
 
 UPDATE_TIMEOUT_SECONDS = 1800  # 30 minutes
+
+
+def _run_install_command(cmd, on_status, shown='Installing…'):
+    """Runs an install command to completion, killing its whole process group
+    after UPDATE_TIMEOUT_SECONDS, and calls on_status('Downloading…' or
+    'Installing…') whenever xbps-install's section headers change. Returns
+    (exit code, last output lines); the exit code is -1 if it could not run."""
+    returncode = -1
+    watchdog = None
+    tail = collections.deque(maxlen=5)
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, start_new_session=True
+        )
+        # stdout iteration blocks until EOF, so a wait(timeout=)
+        # afterwards can never fire on a hang; the watchdog can.
+        watchdog = threading.Timer(
+            UPDATE_TIMEOUT_SECONDS, _kill_process_group, args=(proc,)
+        )
+        watchdog.daemon = True
+        watchdog.start()
+        # xbps-install prints section headers like "[*] Downloading
+        # packages", "[*] Collecting package files", "[*] Unpacking
+        # packages", "[*] Configuring unpacked packages" — the actual
+        # per-file lines under them don't contain words like
+        # "download" at all, so we key off these headers instead.
+        # Every line in this stream belongs to the command being run
+        # regardless of wording.
+        for line in proc.stdout:
+            stripped = line.strip()
+            if stripped:
+                tail.append(stripped)
+            if not stripped.startswith('[*]'):
+                continue
+            status = 'Downloading…' if stripped.startswith('[*] Downloading') else 'Installing…'
+            if status != shown:  # each change rebuilds the list; skip repeats
+                shown = status
+                on_status(status)
+        proc.wait()
+        returncode = proc.returncode
+    except Exception:
+        pass
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+    return returncode, list(tail)
 
 
 class UpdatesMixin:
@@ -102,7 +151,20 @@ class UpdatesMixin:
         self.refresh_list()
         return False
 
+    def _set_all_status(self, pkgnames, status):
+        GLib.idle_add(self._apply_all_status, list(pkgnames), status)
+
+    def _apply_all_status(self, pkgnames, status):
+        for pkgname in pkgnames:
+            self.install_status[pkgname] = status
+        self.refresh_list()
+        return False
+
     def _run_update_all(self, pkgnames):
+        installer, steps = load_updates_installer()
+        if choose_installer(installer) == 'topgrade':
+            self._run_topgrade(pkgnames, steps)
+            return
         with self._xbps_lock:
             versions_at_start = {pkg: get_installed_version(pkg) for pkg in pkgnames}
             for pkgname in pkgnames:
@@ -118,46 +180,36 @@ class UpdatesMixin:
                     continue
                 self._set_status(pkgname, 'Installing…')
                 cmd = PRIVILEGE_CMD + ['xbps-install', '-Su', '-y', pkgname]
-                returncode = -1
-                watchdog = None
-                try:
-                    proc = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, bufsize=1, start_new_session=True
-                    )
-                    # stdout iteration blocks until EOF, so a wait(timeout=)
-                    # afterwards can never fire on a hang; the watchdog can.
-                    watchdog = threading.Timer(
-                        UPDATE_TIMEOUT_SECONDS, _kill_process_group, args=(proc,)
-                    )
-                    watchdog.daemon = True
-                    watchdog.start()
-                    # xbps-install prints section headers like "[*] Downloading
-                    # packages", "[*] Collecting package files", "[*] Unpacking
-                    # packages", "[*] Configuring unpacked packages" — the actual
-                    # per-file lines under them don't contain words like
-                    # "download" at all, so we key off these headers instead.
-                    # Since we install one package at a time, every line in this
-                    # stream belongs to the current package regardless of wording.
-                    shown = 'Installing…'
-                    for line in proc.stdout:
-                        stripped = line.strip()
-                        if not stripped.startswith('[*]'):
-                            continue
-                        status = 'Downloading…' if stripped.startswith('[*] Downloading') else 'Installing…'
-                        if status != shown:  # each change rebuilds the list; skip repeats
-                            shown = status
-                            self._set_status(pkgname, status)
-                    proc.wait()
-                    returncode = proc.returncode
-                except Exception:
-                    pass
-                finally:
-                    if watchdog is not None:
-                        watchdog.cancel()
+                # since we install one package at a time, every status change
+                # in the stream belongs to this package
+                returncode, _tail = _run_install_command(
+                    cmd, lambda status, pkg=pkgname: self._set_status(pkg, status))
                 after = get_installed_version(pkgname)
                 success = returncode == 0 and before != after
                 if success:
+                    self._set_status(pkgname, 'Done')
+                    GLib.timeout_add(1200, self._finalize_package_removal, pkgname)
+                else:
+                    self._set_status(pkgname, 'Failed')
+        GLib.idle_add(self._end_install)
+
+    def _run_topgrade(self, pkgnames, steps):
+        """One topgrade run for everything pending instead of one xbps-install
+        per package. Its system step on Void is `sudo xbps-install -Su xbps`
+        then `sudo xbps-install -u`, and it also runs any other steps listed
+        under steps= in [updates]. It cannot report per package, so every row
+        shares one status, and afterwards each package counts as done when its
+        installed version changed, however topgrade itself exited."""
+        with self._xbps_lock:
+            before = {pkg: get_installed_version(pkg) for pkg in pkgnames}
+            self._set_all_status(pkgnames, 'Updating…')
+            returncode, tail = _run_install_command(
+                topgrade_command(steps), lambda status: self._set_all_status(pkgnames, status),
+                shown='Updating…')
+            if returncode != 0:
+                _log(f'topgrade exited with {returncode}: ' + ' | '.join(tail))
+            for pkgname in pkgnames:
+                if get_installed_version(pkgname) != before[pkgname]:
                     self._set_status(pkgname, 'Done')
                     GLib.timeout_add(1200, self._finalize_package_removal, pkgname)
                 else:
