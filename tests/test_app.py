@@ -126,6 +126,23 @@ class TestRunTopgrade(unittest.TestCase):
         self.assertFalse(summary['ok'])
         self.assertEqual(summary['details'], ['Flatpak: sudo: a password is required'])
 
+    def test_the_summary_names_the_packages_that_were_updated(self):
+        stub, _, _ = self._run(['a', 'b'], ['1', '1', '2', '2'])
+        self.assertEqual(stub.summaries[0]['updated'], ['a', 'b'])
+        self.assertEqual(stub.summaries[0]['not_updated'], [])
+
+    def test_and_the_ones_whose_version_did_not_change(self):
+        stub, _, _ = self._run(['a', 'held', 'c'], ['1', '1', '1', '2', '1', '2'])
+        self.assertEqual(stub.summaries[0]['updated'], ['a', 'c'])
+        self.assertEqual(stub.summaries[0]['not_updated'], ['held'])
+
+    def test_a_step_that_says_ok_does_not_make_unchanged_packages_count_as_updated(self):
+        lines = [self.head('System update'), self.head('Summary'), 'System update: OK\n']
+        stub, _, _ = self._run(['a'], ['1', '1'], lines=lines)
+        self.assertTrue(stub.summaries[0]['ok'])
+        self.assertEqual(stub.summaries[0]['updated'], [])
+        self.assertEqual(stub.summaries[0]['not_updated'], ['a'])
+
     def test_a_topgrade_that_could_not_start_still_reports_something(self):
         stub, _, _ = self._run(['a'], ['1', '1'], popen_error=FileNotFoundError('topgrade'))
         self.assertEqual(len(stub.summaries), 1)

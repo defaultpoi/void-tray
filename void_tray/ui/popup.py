@@ -36,6 +36,7 @@ LAUNCHER_MAX_HEIGHT_PX = 300  # the Launch list scrolls beyond this
 
 LIST_BOTTOM_SPACE_PX = 85  # reserved under the last row for the timer slide (countdown mode)
 ORPHAN_LIST_MAX_NAMES = 30  # package names listed under an expanded orphaned-packages header
+SUMMARY_MAX_NAMES = 60  # package names listed in one line of the update summary
 
 
 POPUP_CSS = """
@@ -516,16 +517,30 @@ class PopupMixin:
         and one row per summary line, with a failed step's last output lines under it."""
         summary = self.update_summary
         verdict = 'OK' if summary['ok'] else 'FAILED'
-        row = self.build_header_row('__summary__', f"Topgrade · {summary['when']} · {verdict}",
-                                    is_first=is_first, clickable=False, summary=True)
+        title = f"Topgrade · {summary['when']} · {verdict}"
+        updated, not_updated = summary.get('updated', []), summary.get('not_updated', [])
+        if 'updated' in summary:
+            title += f" · {self._plural(len(updated), 'package')} updated" if updated else ' · no packages updated'
+        row = self.build_header_row('__summary__', title, is_first=is_first, clickable=False, summary=True)
         row.set_tooltip_text('Click to dismiss')
         self.listbox.add(row)
         for line in summary['lines']:
             escaped = GLib.markup_escape_text(line)
             self.listbox.add(self._orphan_info_row(
                 f'<b><span foreground="#b3261e">{escaped}</span></b>' if line.endswith(': FAILED') else escaped))
+        if updated:
+            self.listbox.add(self._orphan_info_row(f"Updated: {self._name_list(updated)}", wrap=True))
+        if not_updated:
+            self.listbox.add(self._orphan_info_row(
+                f'<span foreground="#b3261e">Not updated: {self._name_list(not_updated)}</span>', wrap=True))
         for line in summary['details']:
             self.listbox.add(self._orphan_info_row(f'<small>{GLib.markup_escape_text(line)}</small>', indent=28))
+
+    @staticmethod
+    def _name_list(names):
+        """Package names for one wrapped line, escaped, cut after SUMMARY_MAX_NAMES."""
+        shown = ', '.join(GLib.markup_escape_text(name) for name in names[:SUMMARY_MAX_NAMES])
+        return shown + (f", … and {len(names) - SUMMARY_MAX_NAMES} more" if len(names) > SUMMARY_MAX_NAMES else '')
 
     def add_orphan_rows(self, orphans, is_first=False):
         """The orphaned-packages header and, once it has been clicked, the choices
@@ -558,8 +573,9 @@ class PopupMixin:
     def _plural(count, noun):
         return f"{count} {noun}{'s' if count != 1 else ''}"
 
-    def _orphan_info_row(self, markup, indent=12):
-        """A plain, inert text row (also used for the update summary)."""
+    def _orphan_info_row(self, markup, indent=12, wrap=False):
+        """A plain, inert text row (also used for the update summary); wrap=True lets a
+        long line break at spaces instead of widening the popup."""
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
         row.set_activatable(False)
@@ -567,6 +583,10 @@ class PopupMixin:
         label.set_markup(markup)
         label.set_xalign(0)
         label.set_margin_start(indent)
+        if wrap:
+            label.set_line_wrap(True)
+            label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            label.set_max_width_chars(46)
         row.add(label)
         return row
 

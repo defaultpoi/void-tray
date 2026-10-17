@@ -268,6 +268,7 @@ class TestRefreshListOrphans(unittest.TestCase):
         add_update_summary_rows = rt.RssTray.add_update_summary_rows
         _orphan_info_row = rt.RssTray._orphan_info_row
         _plural = staticmethod(rt.RssTray._plural)
+        _name_list = staticmethod(rt.RssTray._name_list)
 
         def __init__(self, state, popup_visible=False, status=None, expanded=False):
             self.lock = threading.RLock()
@@ -546,6 +547,55 @@ class TestUpdateSummaryRows(unittest.TestCase):
     def test_a_failed_run_says_failed(self):
         stub, _ = self.rows(self.summary(ok=False, lines=['A: FAILED']))
         self.assertEqual(stub.build_header_row.call_args[0][1], 'Topgrade · 10:46 · FAILED')
+
+    def title(self, **extra):
+        summary = self.summary()
+        summary.update(extra)
+        stub, _ = self.rows(summary)
+        return stub.build_header_row.call_args[0][1]
+
+    def test_the_header_counts_the_packages_that_were_updated(self):
+        self.assertEqual(self.title(updated=['a', 'b', 'c']), 'Topgrade · 10:46 · OK · 3 packages updated')
+        self.assertEqual(self.title(updated=['a']), 'Topgrade · 10:46 · OK · 1 package updated')
+        self.assertEqual(self.title(updated=[]), 'Topgrade · 10:46 · OK · no packages updated')
+
+    def test_a_failed_run_still_says_how_many_were_updated(self):
+        stub, _ = self.rows(self.summary(ok=False, lines=['A: FAILED']) | {'updated': ['a', 'b']})
+        self.assertEqual(stub.build_header_row.call_args[0][1], 'Topgrade · 10:46 · FAILED · 2 packages updated')
+
+    def test_a_summary_without_the_package_lists_has_no_count(self):
+        self.assertEqual(self.title(), 'Topgrade · 10:46 · OK')
+
+    def test_the_updated_package_names_follow_on_one_wrapping_line(self):
+        _, markups = self.rows(self.summary() | {'updated': ['libfoo', 'bar-devel', 'baz']})
+        self.assertIn('Updated: libfoo, bar-devel, baz', markups)
+
+    def test_packages_that_did_not_update_are_called_out_in_red(self):
+        _, markups = self.rows(self.summary() | {'updated': ['a'], 'not_updated': ['held']})
+        line = [m for m in markups if 'Not updated' in m][0]
+        self.assertIn('Not updated: held', line)
+        self.assertIn('foreground="#b3261e"', line)
+
+    def test_no_name_rows_when_both_lists_are_empty(self):
+        _, markups = self.rows(self.summary() | {'updated': [], 'not_updated': []})
+        self.assertFalse([m for m in markups if m.startswith('Updated') or 'Not updated' in m])
+
+    def test_a_very_long_list_is_cut_with_a_count_of_the_rest(self):
+        names = [f'pkg{i}' for i in range(rt.SUMMARY_MAX_NAMES + 5)]
+        _, markups = self.rows(self.summary() | {'updated': names})
+        line = [m for m in markups if m.startswith('Updated')][0]
+        self.assertTrue(line.endswith('… and 5 more'))
+        self.assertIn(f'pkg{rt.SUMMARY_MAX_NAMES - 1}', line)
+        self.assertNotIn(f'pkg{rt.SUMMARY_MAX_NAMES},', line)
+
+    def test_the_name_lines_wrap_instead_of_widening_the_popup(self):
+        stub = self.Stub({})
+        stub.update_summary = self.summary() | {'updated': ['a']}
+        with mock.patch.object(rt.Gtk, 'ListBoxRow'), mock.patch.object(rt.Gtk, 'Label') as label, \
+                mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x):
+            stub.build_header_row = mock.Mock(return_value=mock.MagicMock())
+            stub.add_update_summary_rows()
+        label.return_value.set_line_wrap.assert_called_with(True)
 
     def test_every_summary_line_is_a_row_and_failed_ones_stand_out(self):
         _, markups = self.rows(self.summary(ok=False, lines=['System update: OK', 'Flatpak: FAILED']))

@@ -312,7 +312,8 @@ class UpdatesMixin:
         then `sudo xbps-install -u`, and it also runs any other steps listed
         under steps= in [updates]. It cannot report per package, so every row
         shares one status, and afterwards each package counts as done when its
-        installed version changed, however topgrade itself exited."""
+        installed version changed, however topgrade itself exited; the summary
+        shown afterwards names which did and which did not."""
         with self._xbps_lock:
             before = {pkg: get_installed_version(pkg) for pkg in pkgnames}
             self._set_all_status(pkgnames, 'Updating…')
@@ -322,13 +323,16 @@ class UpdatesMixin:
                 shown='Updating…', on_line=output.feed, env=topgrade_env())
             if returncode != 0:
                 _log(f'topgrade exited with {returncode}: ' + ' | '.join(tail))
-            summary = output.summary(returncode, tail)
-            summary['when'] = time_module.strftime('%H:%M')
-            GLib.idle_add(self._show_update_summary, summary)
+            updated, not_updated = [], []
             for pkgname in pkgnames:
                 if get_installed_version(pkgname) != before[pkgname]:
+                    updated.append(pkgname)
                     self._set_status(pkgname, 'Done')
                     GLib.timeout_add(1200, self._finalize_package_removal, pkgname)
                 else:
+                    not_updated.append(pkgname)
                     self._set_status(pkgname, 'Failed')
+            summary = output.summary(returncode, tail)
+            summary.update(when=time_module.strftime('%H:%M'), updated=updated, not_updated=not_updated)
+            GLib.idle_add(self._show_update_summary, summary)
         GLib.idle_add(self._end_install)
