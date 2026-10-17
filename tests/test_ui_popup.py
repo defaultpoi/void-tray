@@ -265,6 +265,7 @@ class TestRefreshListOrphans(unittest.TestCase):
         refresh_list = rt.RssTray.refresh_list
         build_orphans_header = rt.RssTray.build_orphans_header
         add_orphan_rows = rt.RssTray.add_orphan_rows
+        add_update_summary_rows = rt.RssTray.add_update_summary_rows
         _orphan_info_row = rt.RssTray._orphan_info_row
         _plural = staticmethod(rt.RssTray._plural)
 
@@ -273,6 +274,7 @@ class TestRefreshListOrphans(unittest.TestCase):
             self.state = state
             self.orphan_status = status
             self.orphans_expanded = expanded
+            self.update_summary = None
             self.listbox = mock.MagicMock()
             self.listbox.get_children.return_value = []
             self.popup = mock.MagicMock()
@@ -384,10 +386,10 @@ class TestOrphanRowActivation(unittest.TestCase):
             self.install_all_updates = mock.Mock()
 
     def header(self):
-        return mock.Mock(orphans_header=True, spec_set=None)
+        return mock.Mock(orphans_header=True, summary_header=False, spec_set=None)
 
     def action(self, name):
-        return mock.Mock(orphans_action=name, spec_set=None, orphans_header=False, install_all_header=False)
+        return mock.Mock(orphans_action=name, spec_set=None, orphans_header=False, summary_header=False, install_all_header=False)
 
     def test_clicking_the_header_expands_and_collapses_the_choices(self):
         stub = self.Stub()
@@ -511,6 +513,113 @@ class TestExpandedOrphanRows(unittest.TestCase):
     def test_nothing_to_choose_when_no_orphans_are_left(self):
         _, made, added, _ = self.rows([], expanded=True, status=None)
         self.assertEqual(self.actions(made), [])
+
+
+class TestUpdateSummaryRows(unittest.TestCase):
+    Stub = TestRefreshListOrphans.Stub
+
+    def summary(self, ok=True, lines=('System update: OK',), details=()):
+        return {'ok': ok, 'when': '10:46', 'lines': list(lines), 'details': list(details)}
+
+    def rows(self, summary):
+        stub = self.Stub({})
+        stub.update_summary = summary
+        markups = []
+        with mock.patch.object(rt.Gtk, 'ListBoxRow', side_effect=lambda: mock.MagicMock()), \
+                mock.patch.object(rt.Gtk, 'Label') as label, \
+                mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x):
+            stub.header_calls = []
+            stub.build_header_row = mock.Mock(return_value=mock.MagicMock())
+            stub.add_update_summary_rows(is_first=True)
+            markups = [c.args[0] for c in label.return_value.set_markup.call_args_list]
+        return stub, markups
+
+    def test_the_header_names_the_time_and_the_verdict_and_is_a_dismiss_target(self):
+        stub, _ = self.rows(self.summary())
+        args, kwargs = stub.build_header_row.call_args
+        self.assertEqual(args[:2], ('__summary__', 'Topgrade · 10:46 · OK'))
+        self.assertTrue(kwargs['summary'])
+        self.assertFalse(kwargs['clickable'])  # a click dismisses it; it is not a feed title
+        self.assertTrue(kwargs['is_first'])
+        stub.build_header_row.return_value.set_tooltip_text.assert_called_once_with('Click to dismiss')
+
+    def test_a_failed_run_says_failed(self):
+        stub, _ = self.rows(self.summary(ok=False, lines=['A: FAILED']))
+        self.assertEqual(stub.build_header_row.call_args[0][1], 'Topgrade · 10:46 · FAILED')
+
+    def test_every_summary_line_is_a_row_and_failed_ones_stand_out(self):
+        _, markups = self.rows(self.summary(ok=False, lines=['System update: OK', 'Flatpak: FAILED']))
+        self.assertIn('System update: OK', markups)
+        failed = [m for m in markups if 'Flatpak' in m][0]
+        self.assertIn('foreground="#b3261e"', failed)
+        self.assertNotIn('foreground', [m for m in markups if 'System update' in m][0])
+
+    def test_a_failed_steps_output_follows_in_small_type(self):
+        _, markups = self.rows(self.summary(ok=False, lines=['Broken: FAILED'], details=['Broken: sudo: a password is required']))
+        self.assertIn('<small>Broken: sudo: a password is required</small>', markups)
+
+    def test_markup_in_the_output_is_escaped(self):
+        stub = self.Stub({})
+        stub.update_summary = self.summary(lines=['<b>x</b>: OK'])
+        with mock.patch.object(rt.Gtk, 'ListBoxRow'), mock.patch.object(rt.Gtk, 'Label'), \
+                mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x.replace('<', '&lt;')) as esc:
+            stub.build_header_row = mock.Mock(return_value=mock.MagicMock())
+            stub.add_update_summary_rows()
+        esc.assert_any_call('<b>x</b>: OK')
+
+
+class TestSummaryInTheList(unittest.TestCase):
+    Stub = TestRefreshListOrphans.Stub
+
+    def refresh(self, stub):
+        with mock.patch.object(rt, 'Gtk', mock.MagicMock()), mock.patch.object(rt, 'load_feeds', return_value=[]), \
+                mock.patch.object(rt, 'load_highlight_words', return_value=()), mock.patch.object(rt, 'load_orphan_nudge', return_value=True):
+            stub.refresh_list()
+
+    def summary(self):
+        return {'ok': True, 'when': '10:46', 'lines': ['System update: OK'], 'details': []}
+
+    def test_it_sits_after_the_updates_and_before_the_orphans(self):
+        stub = self.Stub({'available_updates': [{'pkgname': 'p', 'id': '1', 'title': 't', 'link': ''}], 'orphans': ['libfoo']})
+        stub.update_summary = self.summary()
+        stub.add_update_summary_rows = lambda is_first=False: stub.headers.append('__summary__')
+        self.refresh(stub)
+        self.assertEqual(stub.headers, ['__updates__', '__summary__', '__orphans__'])
+
+    def test_it_is_shown_even_when_nothing_else_is(self):
+        stub = self.Stub({})
+        stub.update_summary = self.summary()
+        stub.add_update_summary_rows = lambda is_first=False: stub.headers.append('__summary__')
+        self.refresh(stub)
+        self.assertEqual(stub.headers, ['__summary__'])
+
+    def test_it_keeps_a_visible_popup_open_so_the_result_is_seen(self):
+        stub = self.Stub({}, popup_visible=True)
+        stub.update_summary = self.summary()
+        stub.add_update_summary_rows = lambda is_first=False: None
+        self.refresh(stub)
+        stub.popup.hide.assert_not_called()
+
+    def test_without_a_summary_an_empty_popup_still_closes(self):
+        stub = self.Stub({}, popup_visible=True)
+        self.refresh(stub)
+        stub.popup.hide.assert_called_once()
+
+
+class TestSummaryRowActivation(unittest.TestCase):
+    class Stub:
+        on_row_activated = rt.RssTray.on_row_activated
+
+        def __init__(self, online=True):
+            self.online = online
+            self._clear_update_summary = mock.Mock()
+            self.refresh_list = mock.Mock()
+
+    def test_clicking_the_summary_header_dismisses_it_even_offline(self):
+        for online in (True, False):
+            stub = self.Stub(online=online)
+            stub.on_row_activated(None, mock.Mock(summary_header=True))
+            stub._clear_update_summary.assert_called_once_with()
 
 
 if __name__ == '__main__':

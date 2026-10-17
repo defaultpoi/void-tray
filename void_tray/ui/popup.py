@@ -431,7 +431,7 @@ class PopupMixin:
         only_live_remains = (not unread and not available) and any_live
         popup_already_visible = bool(self.popup and self.popup.get_visible())
         should_hide = truly_empty or (only_live_remains and popup_already_visible)
-        close_popup = should_hide and not keep_open and not self.orphan_status
+        close_popup = should_hide and not keep_open and not self.orphan_status and not self.update_summary
 
         if should_hide:
             row = Gtk.ListBoxRow()
@@ -442,6 +442,8 @@ class PopupMixin:
             lbl.set_margin_bottom(8)
             row.add(lbl)
             self.listbox.add(row)
+            if self.update_summary:
+                self.add_update_summary_rows()
             if show_orphans:
                 self.add_orphan_rows(orphans, is_first=False)
             if self.popup and close_popup:
@@ -502,9 +504,28 @@ class PopupMixin:
                     lbl = Gtk.Label(label=f"... and {len(available) - MAX_LIST_ITEMS} more")
                     row.add(lbl)
                     self.listbox.add(row)
+            if self.update_summary:
+                self.add_update_summary_rows(is_first=is_first_section)
+                is_first_section = False
             if show_orphans:
                 self.add_orphan_rows(orphans, is_first=is_first_section)
         self.listbox.show_all()
+
+    def add_update_summary_rows(self, is_first=False):
+        """Topgrade's closing summary after Install all: a header (click it to dismiss)
+        and one row per summary line, with a failed step's last output lines under it."""
+        summary = self.update_summary
+        verdict = 'OK' if summary['ok'] else 'FAILED'
+        row = self.build_header_row('__summary__', f"Topgrade · {summary['when']} · {verdict}",
+                                    is_first=is_first, clickable=False, summary=True)
+        row.set_tooltip_text('Click to dismiss')
+        self.listbox.add(row)
+        for line in summary['lines']:
+            escaped = GLib.markup_escape_text(line)
+            self.listbox.add(self._orphan_info_row(
+                f'<b><span foreground="#b3261e">{escaped}</span></b>' if line.endswith(': FAILED') else escaped))
+        for line in summary['details']:
+            self.listbox.add(self._orphan_info_row(f'<small>{GLib.markup_escape_text(line)}</small>', indent=28))
 
     def add_orphan_rows(self, orphans, is_first=False):
         """The orphaned-packages header and, once it has been clicked, the choices
@@ -537,14 +558,15 @@ class PopupMixin:
     def _plural(count, noun):
         return f"{count} {noun}{'s' if count != 1 else ''}"
 
-    def _orphan_info_row(self, markup):
+    def _orphan_info_row(self, markup, indent=12):
+        """A plain, inert text row (also used for the update summary)."""
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
         row.set_activatable(False)
         label = Gtk.Label()
         label.set_markup(markup)
         label.set_xalign(0)
-        label.set_margin_start(12)
+        label.set_margin_start(indent)
         row.add(label)
         return row
 
@@ -563,12 +585,14 @@ class PopupMixin:
                              + (f"\n\n{listing}" if listing else ''))
         return row
 
-    def build_header_row(self, feed_url, feed_name, is_first=False, clickable=True, install_all=False, orphans=False):
+    def build_header_row(self, feed_url, feed_name, is_first=False, clickable=True, install_all=False, orphans=False, summary=False):
         row = Gtk.ListBoxRow()
         row.set_selectable(False)
-        row.set_activatable(clickable or install_all or orphans)
+        row.set_activatable(clickable or install_all or orphans or summary)
         if orphans:
             row.orphans_header = True
+        if summary:
+            row.summary_header = True
         if install_all:
             row.install_all_header = True
             row.set_tooltip_text("Install all available updates")
@@ -706,6 +730,9 @@ class PopupMixin:
         return False
 
     def on_row_activated(self, _listbox, row):
+        if getattr(row, 'summary_header', False):
+            self._clear_update_summary()  # dismissed; works offline like the orphan rows
+            return
         if getattr(row, 'orphans_header', False):  # these work offline: nothing here needs the network
             if self.active_installs == 0 and not self.orphan_status:
                 self.orphans_expanded = not self.orphans_expanded

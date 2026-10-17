@@ -217,5 +217,71 @@ class TestRemoveOrphans(unittest.TestCase):
         self.assertEqual(stub.active_installs, 0)
 
 
+class TestUpdateSummaryState(unittest.TestCase):
+    class Stub:
+        _show_update_summary = rt.RssTray._show_update_summary
+        _clear_update_summary = rt.RssTray._clear_update_summary
+        install_all_updates = rt.RssTray.install_all_updates
+
+        def __init__(self, summary=None, popup=True):
+            self.update_summary = summary
+            self.popup = mock.MagicMock() if popup else None
+            self.refresh_list = mock.Mock()
+            self.lock = threading.RLock()
+            self.state = {'available_updates': [{'pkgname': 'a'}]}
+            self.active_installs = 0
+            self._begin_install = mock.Mock()
+            self._run_update_all = mock.Mock()
+
+    def summary(self, ok=True):
+        return {'ok': ok, 'when': '10:46', 'lines': ['System update: OK' if ok else 'System update: FAILED'], 'details': []}
+
+    def test_showing_stores_it_and_rebuilds_the_list_without_closing_the_popup(self):
+        stub = self.Stub()
+        summary = self.summary()
+        with mock.patch.object(rt, 'GLib'):
+            self.assertFalse(stub._show_update_summary(summary))
+        self.assertIs(stub.update_summary, summary)
+        stub.refresh_list.assert_called_once_with(keep_open=True)
+
+    def test_a_clean_summary_clears_itself_after_a_minute(self):
+        stub = self.Stub()
+        summary = self.summary(ok=True)
+        with mock.patch.object(rt, 'GLib') as glib:
+            stub._show_update_summary(summary)
+        glib.timeout_add_seconds.assert_called_once_with(rt.SUMMARY_CLEAR_SECONDS, stub._clear_update_summary, summary)
+
+    def test_a_summary_with_a_failure_stays_until_it_is_clicked(self):
+        stub = self.Stub()
+        with mock.patch.object(rt, 'GLib') as glib:
+            stub._show_update_summary(self.summary(ok=False))
+        glib.timeout_add_seconds.assert_not_called()
+
+    def test_without_a_popup_nothing_is_rebuilt(self):
+        stub = self.Stub(popup=False)
+        with mock.patch.object(rt, 'GLib'):
+            stub._show_update_summary(self.summary())
+        stub.refresh_list.assert_not_called()
+
+    def test_dismissing_clears_it_and_rebuilds(self):
+        stub = self.Stub(summary=self.summary())
+        self.assertFalse(stub._clear_update_summary())
+        self.assertIsNone(stub.update_summary)
+        stub.refresh_list.assert_called_once_with()
+
+    def test_a_timer_from_an_older_run_does_not_clear_a_newer_summary(self):
+        old, new = self.summary(), self.summary()
+        stub = self.Stub(summary=new)
+        stub._clear_update_summary(old)
+        self.assertIs(stub.update_summary, new)
+        stub.refresh_list.assert_not_called()
+
+    def test_starting_a_new_install_clears_the_old_summary(self):
+        stub = self.Stub(summary=self.summary())
+        with mock.patch.object(rt.threading, 'Thread'):
+            stub.install_all_updates()
+        self.assertIsNone(stub.update_summary)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,5 +1,7 @@
 """Package updates: the xbps dry run and its parser, and the install commands."""
 
+import collections
+import os
 import re
 import shutil
 import subprocess
@@ -74,6 +76,65 @@ def list_orphans():
     if proc.returncode != 0:
         return None
     return parse_orphans(out or '')
+
+
+def topgrade_env():
+    """The environment for a topgrade run: English output whatever the session
+    language, since topgrade translates its own headings and the summary below is
+    found by its heading. C.UTF-8 keeps UTF-8, which the headings use."""
+    return {**os.environ, 'LC_ALL': 'C.UTF-8'}
+
+
+_TOPGRADE_HEADER_RE = re.compile(r'^\u2015+ \d{2}:\d{2}:\d{2} - (?P<name>.+?) \u2015+$')
+_TOPGRADE_RESULT_RE = re.compile(r'^(?P<step>.+): (?P<status>OK|FAILED|SKIPPED)$')
+
+
+class TopgradeOutput:
+    """Reads topgrade's piped output line by line. Each step prints a heading
+    like `―― 10:46:16 - System update ――` followed by its own output, and the run
+    ends with a `Summary` heading and one `<step>: OK|FAILED` line per step. The
+    last few lines of every step are kept so a failed one can be explained."""
+
+    def __init__(self, detail_lines=3):
+        self._detail_lines = detail_lines
+        self._section = None
+        self._in_summary = False
+        self._sections = {}
+        self.summary_lines = []
+
+    def feed(self, line):
+        match = _TOPGRADE_HEADER_RE.match(line)
+        if match:
+            if match.group('name') == 'Summary':
+                self._in_summary = True
+                self._section = None
+            else:
+                self._section = match.group('name')
+                self._sections.setdefault(self._section, collections.deque(maxlen=self._detail_lines))
+        elif self._in_summary:
+            self.summary_lines.append(line)
+        elif self._section is not None:
+            self._sections[self._section].append(line)
+
+    def results(self):
+        """[(step, 'OK' | 'FAILED' | 'SKIPPED')] from the summary."""
+        found = []
+        for line in self.summary_lines:
+            match = _TOPGRADE_RESULT_RE.match(line)
+            if match:
+                found.append((match.group('step'), match.group('status')))
+        return found
+
+    def summary(self, returncode, tail=()):
+        """{'ok', 'lines', 'details'} for the popup: the summary lines as topgrade
+        printed them, and for every failed step its last output lines. Without a
+        summary (topgrade died early, or is not installed) the last output lines
+        stand in for it."""
+        failed = [step for step, status in self.results() if status == 'FAILED']
+        details = [f"{step}: {line}" for step in failed for line in self._sections.get(step, ())]
+        if not self.summary_lines and returncode != 0:
+            details = list(tail)
+        return {'ok': returncode == 0 and not failed, 'lines': list(self.summary_lines), 'details': details}
 
 
 def parse_xbps_updates(output):

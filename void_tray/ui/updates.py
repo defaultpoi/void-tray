@@ -11,7 +11,15 @@ from ..config import load_orphan_nudge, load_updates_check_interval, load_update
 from ..log import _log
 from ..proc import _kill_process_group
 from ..state import save_state
-from ..updates import choose_installer, get_installed_version, list_all_updates, list_orphans, topgrade_command
+from ..updates import (
+    TopgradeOutput,
+    choose_installer,
+    get_installed_version,
+    list_all_updates,
+    list_orphans,
+    topgrade_command,
+    topgrade_env,
+)
 
 
 PRIVILEGE_CMD = ['sudo', '-n']  # -n: fail fast rather than hang if a password would be needed;
@@ -19,13 +27,15 @@ PRIVILEGE_CMD = ['sudo', '-n']  # -n: fail fast rather than hang if a password w
 
 UPDATE_TIMEOUT_SECONDS = 1800  # 30 minutes
 ORPHAN_STATUS_CLEAR_MS = 4000  # how long Done/Failed stays on the orphaned-packages row
+SUMMARY_CLEAR_SECONDS = 60  # a successful topgrade summary goes by itself; a failed one stays until clicked
 
 
-def _run_install_command(cmd, on_status, shown='Installing…'):
+def _run_install_command(cmd, on_status, shown='Installing…', on_line=None, env=None):
     """Runs an install command to completion, killing its whole process group
     after UPDATE_TIMEOUT_SECONDS, and calls on_status('Downloading…' or
-    'Installing…') whenever xbps-install's section headers change. Returns
-    (exit code, last output lines); the exit code is -1 if it could not run."""
+    'Installing…') whenever xbps-install's section headers change, and on_line
+    (if given) with every non-empty output line. Returns (exit code, last output
+    lines); the exit code is -1 if it could not run."""
     returncode = -1
     watchdog = None
     proc = None
@@ -33,7 +43,7 @@ def _run_install_command(cmd, on_status, shown='Installing…'):
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, start_new_session=True
+            text=True, bufsize=1, start_new_session=True, env=env
         )
         # stdout iteration blocks until EOF, so a wait(timeout=)
         # afterwards can never fire on a hang; the watchdog can.
@@ -53,6 +63,8 @@ def _run_install_command(cmd, on_status, shown='Installing…'):
             stripped = line.strip()
             if stripped:
                 tail.append(stripped)
+                if on_line is not None:
+                    on_line(stripped)
             if not stripped.startswith('[*]'):
                 continue
             status = 'Downloading…' if stripped.startswith('[*] Downloading') else 'Installing…'
@@ -136,6 +148,7 @@ class UpdatesMixin:
         if not pkgnames:
             return
         self.install_status = {pkg: 'Waiting…' for pkg in pkgnames}
+        self.update_summary = None  # the last run's summary is stale now
         self._begin_install()
         threading.Thread(target=self._run_update_all, args=(pkgnames,), daemon=True).start()
 
@@ -233,6 +246,24 @@ class UpdatesMixin:
             self.refresh_list()
         return False
 
+    def _show_update_summary(self, summary):
+        """Shows topgrade's closing summary in the popup. A clean one clears itself after a
+        minute; one with a failed step stays until it is clicked, so it is not missed."""
+        self.update_summary = summary
+        if self.popup is not None:
+            self.refresh_list(keep_open=True)
+        if summary['ok']:
+            GLib.timeout_add_seconds(SUMMARY_CLEAR_SECONDS, self._clear_update_summary, summary)
+        return False
+
+    def _clear_update_summary(self, summary=None):
+        if summary is not None and self.update_summary is not summary:
+            return False  # a newer run has replaced it
+        self.update_summary = None
+        if self.popup is not None:
+            self.refresh_list()
+        return False
+
     def _set_all_status(self, pkgnames, status):
         GLib.idle_add(self._apply_all_status, list(pkgnames), status)
 
@@ -285,11 +316,15 @@ class UpdatesMixin:
         with self._xbps_lock:
             before = {pkg: get_installed_version(pkg) for pkg in pkgnames}
             self._set_all_status(pkgnames, 'Updating…')
+            output = TopgradeOutput()
             returncode, tail = _run_install_command(
                 topgrade_command(steps), lambda status: self._set_all_status(pkgnames, status),
-                shown='Updating…')
+                shown='Updating…', on_line=output.feed, env=topgrade_env())
             if returncode != 0:
                 _log(f'topgrade exited with {returncode}: ' + ' | '.join(tail))
+            summary = output.summary(returncode, tail)
+            summary['when'] = time_module.strftime('%H:%M')
+            GLib.idle_add(self._show_update_summary, summary)
             for pkgname in pkgnames:
                 if get_installed_version(pkgname) != before[pkgname]:
                     self._set_status(pkgname, 'Done')

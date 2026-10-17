@@ -18,6 +18,7 @@ class TestRunTopgrade(unittest.TestCase):
             self._xbps_lock = rt.threading.Lock()
             self.statuses = []
             self.all_statuses = []
+            self.summaries = []
             self.ended = False
 
         def _set_status(self, pkg, status):
@@ -25,6 +26,9 @@ class TestRunTopgrade(unittest.TestCase):
 
         def _set_all_status(self, pkgs, status):
             self.all_statuses.append((tuple(pkgs), status))
+
+        def _show_update_summary(self, summary):
+            self.summaries.append(summary)
 
         def _finalize_package_removal(self, pkg):
             pass
@@ -47,6 +51,9 @@ class TestRunTopgrade(unittest.TestCase):
                 mock.patch.object(rt.shutil, 'which', return_value=None):
             stub._run_update_all(pkgnames)
         stub.ended = any(call.args == (stub._end_install,) for call in glib.idle_add.call_args_list)
+        # the summary reaches the popup through GLib.idle_add(self._show_update_summary, summary)
+        stub.summaries = [call.args[1] for call in glib.idle_add.call_args_list
+                          if call.args and call.args[0] == stub._show_update_summary]
         return stub, popen, log
 
     def test_one_topgrade_run_replaces_the_per_package_installs(self):
@@ -98,10 +105,41 @@ class TestRunTopgrade(unittest.TestCase):
         self.assertTrue(stub.ended)
         self.assertIn('-1', log.call_args[0][0])
 
+    @staticmethod
+    def head(name):
+        bar = '\u2015\u2015'
+        return f'{bar} 10:46:16 - {name} {bar}\n'
+
+    def test_the_summary_is_collected_and_handed_to_the_popup(self):
+        lines = [self.head('System update'), '[*] x\n', self.head('Summary'), 'System update: OK\n']
+        stub, _, _ = self._run(['a'], ['1', '2'], lines=lines)
+        self.assertEqual(len(stub.summaries), 1)
+        summary = stub.summaries[0]
+        self.assertTrue(summary['ok'])
+        self.assertEqual(summary['lines'], ['System update: OK'])
+        self.assertRegex(summary['when'], r'^\d\d:\d\d$')
+
+    def test_a_failed_step_arrives_with_its_output(self):
+        lines = [self.head('Flatpak'), 'sudo: a password is required\n', self.head('Summary'), 'Flatpak: FAILED\n']
+        stub, _, _ = self._run(['a'], ['1', '1'], returncode=1, lines=lines)
+        summary = stub.summaries[0]
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['details'], ['Flatpak: sudo: a password is required'])
+
+    def test_a_topgrade_that_could_not_start_still_reports_something(self):
+        stub, _, _ = self._run(['a'], ['1', '1'], popen_error=FileNotFoundError('topgrade'))
+        self.assertEqual(len(stub.summaries), 1)
+        self.assertFalse(stub.summaries[0]['ok'])
+
+    def test_topgrade_runs_with_english_output_forced(self):
+        _, popen, _ = self._run(['a'], ['1', '2'])
+        self.assertEqual(popen.call_args[1]['env']['LC_ALL'], 'C.UTF-8')
+
     def test_xbps_is_used_when_asked_for_or_when_topgrade_is_not_installed(self):
         for installer in (('xbps', ('system',)), ('auto', ('system',))):
             stub, popen, _ = self._run(['a'], ['1', '1', '2'], installer=installer)
             self.assertEqual(popen.call_args[0][0][-4:], ['xbps-install', '-Su', '-y', 'a'], installer)
+            self.assertEqual(stub.summaries, [], installer)  # only topgrade has a summary to show
 
 
 class TestRunUpdateAll(unittest.TestCase):

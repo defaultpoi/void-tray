@@ -60,6 +60,7 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self.install_status = {}  # pkgname -> 'Waiting…'/'Downloading…'/'Installing…'/'Done'/'Failed'
         self.orphan_status = None  # 'Removing…'/'Done'/'Failed' while the orphaned-packages row shows a result
         self.orphans_expanded = False  # the row has been clicked: Remove / Cancel are showing under it
+        self.update_summary = None  # topgrade's closing summary of the last Install all, shown until dismissed
         self.timer_remaining_seconds = 0
         self.timer_running = False
         self.timer_deadline = None  # time_module.monotonic() value at which the timer fires
