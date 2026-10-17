@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest import mock
 
 from facade import rt
@@ -290,6 +291,166 @@ class TestScheduleRuntime(TmpConfigCase):
         self.assertEqual(self.stub._schedule_summary(rt.load_schedule_settings()), 'Schedule off')
         self.conf('[feeds]\n')
         self.assertEqual(self.stub._schedule_summary(rt.load_schedule_settings()), 'Schedule off')
+
+
+def at(hour, minute=0, second=0, day=14):
+    """A local timestamp on Wednesday 14 October 2026."""
+    return datetime(2026, 10, day, hour, minute, second).timestamp()
+
+
+class TestFormatClock(unittest.TestCase):
+    def test_hours_minutes_seconds_zero_padded(self):
+        self.assertEqual(rt.format_clock(0), '00:00:00')
+        self.assertEqual(rt.format_clock(5), '00:00:05')
+        self.assertEqual(rt.format_clock(3661), '01:01:01')
+        self.assertEqual(rt.format_clock(4 * 3600 + 34 * 60 + 23), '04:34:23')
+
+    def test_a_long_countdown_keeps_counting_hours(self):
+        self.assertEqual(rt.format_clock(100 * 3600), '100:00:00')
+
+    def test_negative_or_fractional_values_are_safe(self):
+        self.assertEqual(rt.format_clock(-3), '00:00:00')
+        self.assertEqual(rt.format_clock(59.9), '00:00:59')
+
+
+class TestFormatScheduleTime(unittest.TestCase):
+    def test_within_a_day_it_is_just_the_clock_time(self):
+        self.assertEqual(rt.format_schedule_time(at(23, 59), at(10)), '23:59')
+        self.assertEqual(rt.format_schedule_time(at(0, 30, day=15), at(23, 50)), '00:30')
+
+    def test_a_day_or_more_away_gets_the_weekday(self):
+        self.assertEqual(rt.format_schedule_time(at(7, 30, day=19), at(10)), 'Mon 07:30')
+        self.assertEqual(rt.format_schedule_time(at(10, day=15), at(10)), 'Thu 10:00')  # exactly 24 h ahead
+
+
+class TestTimerStatusLines(unittest.TestCase):
+    class Stub:
+        _timer_status_lines = rt.RssTray._timer_status_lines
+
+        def __init__(self, remaining=0, running=False, schedules=(), overrides=None):
+            self.timer_remaining_seconds = remaining
+            self.timer_running = running
+            self._schedules = list(schedules)
+            self._overrides = overrides or {}
+
+        def _schedule_settings(self):
+            return {'schedules': self._schedules}
+
+        def _schedule_state(self):
+            return {}, self._overrides
+
+    def entry(self, hh, mm, action='Suspend', days=frozenset(range(7)), enabled=True):
+        return {'enabled': enabled, 'minute': hh * 60 + mm, 'days': days, 'action': action}
+
+    def lines(self, stub, now=None):
+        with mock.patch.object(rt.time_module, 'time', return_value=now or at(10)):
+            return stub._timer_status_lines()
+
+    def test_nothing_counting_nothing_to_show(self):
+        self.assertEqual(self.lines(self.Stub()), [])
+
+    def test_a_running_countdown_is_hh_mm_ss(self):
+        self.assertEqual(self.lines(self.Stub(remaining=5025, running=True)), ['01:23:45'])
+
+    def test_a_countdown_that_is_not_running_or_has_run_out_is_not_shown(self):
+        self.assertEqual(self.lines(self.Stub(remaining=60, running=False)), [])
+        self.assertEqual(self.lines(self.Stub(remaining=0, running=True)), [])
+
+    def test_a_schedule_is_its_action_label_then_its_time(self):
+        stub = self.Stub(schedules=[self.entry(23, 59, 'Suspend')])
+        self.assertEqual(self.lines(stub), ['Suspend 23:59'])
+
+    def test_the_countdown_comes_first_then_schedules_soonest_first(self):
+        stub = self.Stub(remaining=90, running=True, schedules=[
+            self.entry(23, 0, 'Power off'), self.entry(12, 0, 'Suspend')])
+        self.assertEqual(self.lines(stub), ['00:01:30', 'Suspend 12:00', 'Power off 23:00'])
+
+    def test_disabled_schedules_are_not_active(self):
+        stub = self.Stub(schedules=[self.entry(12, 0, enabled=False), self.entry(13, 0, 'Power off')])
+        self.assertEqual(self.lines(stub), ['Power off 13:00'])
+
+    def test_a_schedule_that_already_ran_today_shows_its_next_day(self):
+        stub = self.Stub(schedules=[self.entry(9, 0, 'Suspend')])  # 09:00 daily, now 10:00: next is tomorrow
+        self.assertEqual(self.lines(stub), ['Suspend 09:00'])
+
+    def test_a_weekly_schedule_names_its_day(self):
+        stub = self.Stub(schedules=[self.entry(7, 30, 'Power off', days=frozenset({0}))])  # Mondays; today is Wednesday
+        self.assertEqual(self.lines(stub), ['Power off Mon 07:30'])
+
+    def test_a_snoozed_schedule_shows_the_snoozed_time(self):
+        entry = self.entry(12, 0, 'Suspend')
+        key = rt.schedule_key(entry)
+        stub = self.Stub(schedules=[entry], overrides={key: {'occ': at(12), 'fire': at(12, 30)}})
+        self.assertEqual(self.lines(stub), ['Suspend 12:30'])
+
+    def test_too_many_lines_end_with_a_count_of_the_rest(self):
+        stub = self.Stub(remaining=60, running=True, schedules=[self.entry(11 + i % 10, i, f'Act{i}') for i in range(8)])
+        lines = self.lines(stub)
+        self.assertEqual(len(lines), rt.TIMER_STATUS_MAX_LINES)
+        self.assertEqual(lines[-1], '+4 more')  # 9 entries, 5 shown
+
+
+class TestTimerStatusWidget(unittest.TestCase):
+    class Stub:
+        _update_timer_status = rt.RssTray._update_timer_status
+        on_timer_toggle_clicked = rt.RssTray.on_timer_toggle_clicked
+        _timer_tick = rt.RssTray._timer_tick
+
+        def __init__(self, lines=(), slide_open=False):
+            self.timer_status_label = mock.Mock()
+            self.timer_status_box = mock.Mock()
+            self._timer_status_text = None
+            self.timer_visible = slide_open
+            self.timer_box = mock.Mock()
+            self.timer_running = False
+            self.timer_deadline = None
+            self._lines = list(lines)
+            self._timer_status_lines = lambda: list(self._lines)
+            self._schedule_tick = mock.Mock()
+
+    def test_the_lines_become_right_aligned_rows_and_the_box_is_shown(self):
+        stub = self.Stub(['01:00:00', 'Suspend 23:59'])
+        stub._update_timer_status()
+        stub.timer_status_label.set_text.assert_called_once_with('01:00:00\nSuspend 23:59')
+        stub.timer_status_box.set_visible.assert_called_once_with(True)
+
+    def test_nothing_counting_hides_the_box(self):
+        stub = self.Stub([])
+        stub._update_timer_status()
+        stub.timer_status_box.set_visible.assert_called_once_with(False)
+
+    def test_while_the_slide_is_open_the_readout_is_hidden(self):
+        stub = self.Stub(['01:00:00'], slide_open=True)
+        stub._update_timer_status()
+        stub.timer_status_box.set_visible.assert_called_once_with(False)
+
+    def test_the_text_is_only_set_when_it_changes(self):
+        stub = self.Stub(['01:00:00'])
+        stub._update_timer_status()
+        stub._update_timer_status()
+        self.assertEqual(stub.timer_status_label.set_text.call_count, 1)
+        stub._lines = ['00:59:59']
+        stub._update_timer_status()
+        self.assertEqual(stub.timer_status_label.set_text.call_count, 2)
+
+    def test_without_a_popup_nothing_happens(self):
+        stub = self.Stub(['x'])
+        stub.timer_status_label = None
+        stub._update_timer_status()  # no error
+
+    def test_every_tick_refreshes_it(self):
+        stub = self.Stub(['01:00:00'])
+        self.assertTrue(stub._timer_tick())
+        stub.timer_status_label.set_text.assert_called_once_with('01:00:00')
+
+    def test_opening_and_closing_the_slide_swaps_slide_and_readout(self):
+        stub = self.Stub(['01:00:00'])
+        stub._update_timer_status()
+        stub.on_timer_toggle_clicked(None)  # open
+        self.assertTrue(stub.timer_visible)
+        stub.timer_status_box.set_visible.assert_called_with(False)
+        stub.on_timer_toggle_clicked(None)  # close
+        stub.timer_status_box.set_visible.assert_called_with(True)
 
 
 if __name__ == '__main__':

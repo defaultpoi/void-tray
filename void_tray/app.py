@@ -68,6 +68,9 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self.timer_scale = None
         self.timer_label = None
         self.timer_box = None
+        self.timer_status_box = None  # the corner readout shown while the Timer slide is closed
+        self.timer_status_label = None
+        self._timer_status_text = None
         self.timer_visible = False
         self.timer_mode = 'countdown'     # or 'schedule' (the slide's two modes)
         self._mode_updating = False

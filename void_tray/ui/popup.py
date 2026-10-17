@@ -54,6 +54,8 @@ row.breaking-on { background: #ffc9c9; }
 .schedule-warning button label { color: #000000; font-weight: normal; }
 .weather-bar label, .timer-bar label { color: #000000; }
 .timer-bar { background: #ffffff; }
+.timer-status { background: rgba(255, 255, 255, 0.9); border-radius: 4px; padding: 1px 6px; }
+.timer-status label { color: #333333; font-size: 11px; }
 """
 
 
@@ -287,6 +289,26 @@ class PopupMixin:
 
         self.timer_box = timer_box
         content_overlay.add_overlay(timer_box)
+
+        # the readout that stands in for the slide while it is closed: what is counting,
+        # one per line, right-aligned in the bottom-right corner above the footer
+        status_label = Gtk.Label()
+        status_label.set_xalign(1)
+        status_label.set_justify(Gtk.Justification.RIGHT)
+        status_label.show()
+        status_box = Gtk.Box()
+        status_box.get_style_context().add_class('timer-status')
+        status_box.add(status_label)
+        status_box.set_halign(Gtk.Align.END)
+        status_box.set_valign(Gtk.Align.END)
+        status_box.set_margin_end(10)
+        status_box.set_margin_bottom(6)
+        status_box.set_no_show_all(True)
+        content_overlay.add_overlay(status_box)
+        content_overlay.set_overlay_pass_through(status_box, True)  # clicks reach the list underneath
+        self.timer_status_box, self.timer_status_label = status_box, status_label
+        self._timer_status_text = None
+        self._update_timer_status()
         # timer_box has no_show_all(True) so that the popup's own show_all()
         # doesn't reveal it prematurely — but that flag ALSO blocks show_all()
         # called on timer_box itself (no_show_all stops recursion at the

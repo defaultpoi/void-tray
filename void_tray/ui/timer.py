@@ -51,6 +51,25 @@ def format_timer_duration(total_seconds):
     return f"{h} Hours, {m:02d} Minutes and {s:02d} Seconds"
 
 
+def format_clock(total_seconds):
+    """hh:mm:ss, zero-padded, for the corner readout of a running countdown."""
+    hours, rest = divmod(max(0, int(total_seconds)), 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def format_schedule_time(fire_ts, now_ts):
+    """HH:MM of a coming fire time, with the weekday in front when it is a day or
+    more away (a weekly schedule), as the Schedule tab's "Next:" line writes it."""
+    when = datetime.fromtimestamp(fire_ts)
+    if fire_ts - now_ts >= 24 * 3600:
+        return f"{_DAY_NAMES[when.weekday()][:3].title()} {when:%H:%M}"
+    return f"{when:%H:%M}"
+
+
+TIMER_STATUS_MAX_LINES = 6  # beyond this the readout ends with "+N more"
+
+
 def format_timer_countdown(total_seconds, now=None):
     """The remaining time followed by the clock time it ends at, e.g.
     '4 Hours, 34 Minutes and 23 Seconds (15:11)'. At zero nothing is counting,
@@ -457,6 +476,7 @@ class TimerMixin:
         self.timer_visible = not self.timer_visible
         if self.timer_box is not None:
             self.timer_box.set_visible(self.timer_visible)
+        self._update_timer_status()
 
     def _timer_tick(self):
         if self.timer_running and self.timer_deadline is not None:
@@ -468,7 +488,42 @@ class TimerMixin:
                 self._fire_timer_done()
             self._update_timer_widgets()
         self._schedule_tick()
+        self._update_timer_status()
         return True
+
+    def _timer_status_lines(self):
+        """What is counting right now, one entry per line: the running countdown as
+        hh:mm:ss, then each enabled schedule as its action label and the time it
+        next fires (a snoozed one at its snoozed time), soonest first."""
+        lines = []
+        if self.timer_running and self.timer_remaining_seconds > 0:
+            lines.append(format_clock(self.timer_remaining_seconds))
+        now_ts = time_module.time()
+        fired, overrides = self._schedule_state()
+        upcoming = []
+        for entry in self._schedule_settings()['schedules']:
+            if not entry['enabled']:
+                continue
+            key = schedule_key(entry)
+            fires = [fire for _occurrence, fire in schedule_pending(now_ts, entry, fired.get(key, 0), overrides.get(key))
+                     if fire > now_ts]
+            if fires:
+                upcoming.append((min(fires), entry['action']))
+        lines += [f"{action} {format_schedule_time(fire, now_ts)}" for fire, action in sorted(upcoming)]
+        if len(lines) > TIMER_STATUS_MAX_LINES:
+            lines = lines[:TIMER_STATUS_MAX_LINES - 1] + [f"+{len(lines) - TIMER_STATUS_MAX_LINES + 1} more"]
+        return lines
+
+    def _update_timer_status(self):
+        """The readout in the popup's bottom-right corner, shown only while the Timer
+        slide is closed and something is counting; the slide itself shows it all otherwise."""
+        if self.timer_status_label is None:
+            return
+        text = '' if self.timer_visible else '\n'.join(self._timer_status_lines())
+        if text != self._timer_status_text:  # the label only changes when a line does
+            self._timer_status_text = text
+            self.timer_status_label.set_text(text)
+        self.timer_status_box.set_visible(bool(text))
 
     def _fire_timer_done(self):
         play_notification_sound()

@@ -207,6 +207,22 @@ class TestPopupReservesRoomForTheScheduleSlide(unittest.TestCase):
             rt.TIMER_RESERVED_HEIGHT_PX,
             rt.LIST_ROW_RESERVE_PX + rt.TIMER_HEIGHT_SCHEDULE_PX + rt.TIMER_SPACER_EXTRA_PX)
 
+    def test_the_closed_timer_readout_is_an_overlay_that_lets_clicks_through(self):
+        gtk = mock.MagicMock()
+        app = mock.MagicMock()
+        app.timer_remaining_seconds = 0
+        app.timer_mode = 'countdown'
+        app.timer_visible = False
+        with mock.patch.object(rt, 'Gtk', gtk), mock.patch.object(rt, 'Gdk', mock.MagicMock()), \
+                mock.patch.object(rt, 'load_timer_settings', return_value={'max_seconds': 7200, 'step_seconds': 60}):
+            rt.RssTray.build_popup_window(app)
+        overlay = gtk.Overlay.return_value
+        overlay.set_overlay_pass_through.assert_called_once()
+        self.assertIs(app.timer_status_box, gtk.Box.return_value)
+        self.assertIs(app.timer_status_label, gtk.Label.return_value)
+        gtk.Label.return_value.set_justify.assert_any_call(gtk.Justification.RIGHT)
+        app._update_timer_status.assert_called()
+
     def test_the_reserve_covers_the_slide_it_is_for(self):
         self.assertGreater(rt.TIMER_RESERVED_HEIGHT_PX, rt.TIMER_HEIGHT_SCHEDULE_PX)
         self.assertGreater(rt.TIMER_HEIGHT_SCHEDULE_PX, rt.TIMER_HEIGHT_COUNTDOWN_PX)
