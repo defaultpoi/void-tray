@@ -28,6 +28,12 @@ def load_state():
         state['unread'] = []
     if not isinstance(state.get('available_updates'), list):
         state['available_updates'] = []
+    # saved items need an id, a title and a link to be listed and opened
+    if isinstance(state.get('read_later'), list):
+        state['read_later'] = [e for e in state['read_later']
+                               if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ('id', 'title', 'link'))]
+    else:
+        state['read_later'] = []
     if isinstance(state.get('orphans'), list):
         state['orphans'] = [name for name in state['orphans'] if isinstance(name, str)]
     else:

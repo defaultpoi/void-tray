@@ -30,16 +30,29 @@ def parse_mute_rules(text):
     return rules
 
 
-def load_feed_mute_rules():
-    """{feed url: [(field, pattern), ...]} from the fourth field of [feeds] lines."""
+FEED_MUTE_COLUMN = 3  # [feeds] lines: URL | name | interval | mute rules | read-later rules
+FEED_READLATER_COLUMN = 4
+
+
+def _load_feed_rules(column):
     rules = {}
     for line in _read_config_sections()['feeds']:
         parts = [p.strip() for p in line.split('|')]
-        if len(parts) > 3 and parts[3]:
-            parsed = parse_mute_rules(parts[3])
+        if len(parts) > column and parts[column]:
+            parsed = parse_mute_rules(parts[column])
             if parsed:
                 rules.setdefault(parts[0], []).extend(parsed)
     return rules
+
+
+def load_feed_mute_rules():
+    """{feed url: [(field, pattern), ...]} from the fourth field of [feeds] lines."""
+    return _load_feed_rules(FEED_MUTE_COLUMN)
+
+
+def load_feed_readlater_rules():
+    """The same from the fifth field: items matching one go straight to Read later."""
+    return _load_feed_rules(FEED_READLATER_COLUMN)
 
 
 # A rule's field name -> the feedparser entry keys it reads ('category' is how
@@ -179,10 +192,21 @@ def escape_mute_value(value):
 
 def add_feed_mute_rule(feed_url, field, value):
     """Adds 'field=value' to the mute rules (fourth field) of feed_url's line
-    in [feeds]. If the line already has a rule for that field the value joins
-    it ('category=a, b'); otherwise a new 'field=value' rule is appended. True
-    if something was added, False if the feed line wasn't found or the value
-    was already muted."""
+    in [feeds]; see _add_feed_rule."""
+    return _add_feed_rule(feed_url, field, value, FEED_MUTE_COLUMN)
+
+
+def add_feed_readlater_rule(feed_url, field, value):
+    """The same for the read-later rules, the fifth field of the line."""
+    return _add_feed_rule(feed_url, field, value, FEED_READLATER_COLUMN)
+
+
+def _add_feed_rule(feed_url, field, value, column):
+    """Adds 'field=value' to the rules in field number `column` of feed_url's
+    line in [feeds]. If the line already has a rule for that field the value
+    joins it ('category=a, b'); otherwise a new 'field=value' rule is appended.
+    True if something was added, False if the feed line wasn't found or the
+    value was already there."""
     escaped = escape_mute_value(value)
     wanted = _fold_text(escaped)
     result = {'added': False}
@@ -193,7 +217,7 @@ def add_feed_mute_rule(feed_url, field, value):
             name, sep, _values = piece.partition('=')
             if sep and name.strip().lower() == field:
                 if wanted in [pattern for _f, pattern in parse_mute_rules(piece)]:
-                    return None  # already muted
+                    return None  # already there
                 pieces[index] = f'{piece.rstrip()}, {escaped}'
                 return ';'.join(pieces)
         return f'{rules_text.strip()}; {field}={escaped}' if rules_text.strip() else f'{field}={escaped}'
@@ -206,12 +230,12 @@ def add_feed_mute_rule(feed_url, field, value):
             if parts is None or parts[0].strip() != feed_url or result['added']:
                 out.append(line)
                 continue
-            parts += [''] * (4 - len(parts))
-            merged = merge(parts[3])
+            parts += [''] * (column + 1 - len(parts))
+            merged = merge(parts[column])
             if merged is None:
                 out.append(line)
                 continue
-            parts[3] = merged
+            parts[column] = merged
             out.append('|'.join(parts) + '\n')
             result['added'] = True
         return out

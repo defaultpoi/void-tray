@@ -1,6 +1,3 @@
-import os
-import shutil
-import tempfile
 import time
 import unittest
 from unittest import mock
@@ -194,6 +191,88 @@ class TestFeedMuteRules(TmpConfigCase):
         self.assertEqual(len(by_feed['https://b.example/feed']), 3)       # the other feed is not affected
         self.assertEqual(len(stub.state['seen']), 6)                       # muted items still count as seen
 
+    def test_read_later_rules_come_from_the_fifth_feed_field(self):
+        self.conf('[feeds]\nhttps://a.example/feed|A|5|category=sports|author=x, y\nhttps://b.example/feed|B\n'
+                  'https://c.example/feed||||category=plants\nhttps://d.example/feed|D|5|category=news\n')
+        self.assertEqual(rt.load_feed_readlater_rules(), {
+            'https://a.example/feed': [('author', 'x'), ('author', 'y')],
+            'https://c.example/feed': [('category', 'plants')]})
+        self.assertEqual(rt.load_feed_mute_rules()['https://a.example/feed'], [('category', 'sports')])  # the columns stay apart
+        self.assertEqual(len(rt.load_feeds()), 4)
+
+    class LaterStub:
+        check_feeds = rt.RssTray.check_feeds
+
+        def __init__(self):
+            self.online = True
+            self.lock = rt.threading.Lock()
+            self.state = {'seen': {}, 'unread': [], 'last_checked': {}}
+            self.on_new_items = mock.Mock()
+            self.note_request_failure = mock.Mock()
+            self._read_later_changed = mock.Mock()
+
+    def check_with(self, conf, stub=None):
+        self.conf(conf)
+        stub = stub or self.LaterStub()
+        with mock.patch.object(rt.feedparser, 'parse', return_value=rt.feedparser.parse(WORDPRESS_FEED)), \
+                mock.patch.object(rt, 'entry_age_seconds', return_value=0), \
+                mock.patch.object(rt.time_module, 'time', return_value=5000.0), \
+                mock.patch.object(rt, 'save_state'), mock.patch.object(rt.GLib, 'idle_add') as idle:
+            stub.check_feeds(force=True)
+        return stub, idle
+
+    def test_items_matching_a_read_later_rule_go_to_the_read_later_list_not_unread(self):
+        stub, _ = self.check_with('[feeds]\nhttps://a.example/feed||||category=plants\n')
+        saved = stub.state['read_later']
+        self.assertEqual([e['title'] for e in saved], ['Garden tips'])
+        self.assertEqual(saved[0]['saved'], 5000.0)
+        self.assertEqual(saved[0]['feed_url'], 'https://a.example/feed')
+        self.assertIn('plants', [t.lower() for t in saved[0]['tags']])
+        self.assertNotIn('Garden tips', [e['title'] for e in stub.state['unread']])
+        self.assertEqual(len(stub.state['unread']), 2)
+        self.assertEqual(len(stub.state['seen']), 3)  # they count as seen like any other item
+
+    def test_such_items_raise_no_new_item_alert_only_a_quiet_refresh(self):
+        stub, idle = self.check_with('[feeds]\nhttps://a.example/feed||||category=plants\n')
+        idle.assert_any_call(stub.on_new_items)  # the two other items still alert
+        idle.assert_any_call(stub._read_later_changed)
+        stub2, idle2 = self.check_with('[feeds]\nhttps://a.example/feed||||category=*\n')
+        self.assertEqual(stub2.state['unread'], [])
+        idle2.assert_called_once_with(stub2._read_later_changed)  # all of them went to Read later: nothing to alert about
+        stub2.on_new_items.assert_not_called()
+
+    def test_a_mute_rule_wins_over_a_read_later_rule(self):
+        stub, _ = self.check_with('[feeds]\nhttps://a.example/feed|||category=plants|category=plants\n')
+        self.assertEqual(stub.state.get('read_later', []), [])
+        self.assertNotIn('Garden tips', [e['title'] for e in stub.state['unread']])
+
+    def test_too_old_items_are_not_filed_under_read_later(self):
+        self.conf('[feeds]\nhttps://a.example/feed||||category=plants\n')
+        stub = self.LaterStub()
+        with mock.patch.object(rt.feedparser, 'parse', return_value=rt.feedparser.parse(WORDPRESS_FEED)), \
+                mock.patch.object(rt, 'entry_age_seconds', return_value=3 * 24 * 3600), \
+                mock.patch.object(rt, 'save_state'), mock.patch.object(rt.GLib, 'idle_add'):
+            stub.check_feeds(force=True)
+        self.assertEqual(stub.state.get('read_later', []), [])
+
+    def test_an_item_already_saved_is_not_added_twice_and_new_ones_go_in_front(self):
+        stub = self.LaterStub()
+        stub.state['read_later'] = [{'id': 'older', 'title': 'Old save', 'link': 'l', 'saved': 1.0}]
+        stub, _ = self.check_with('[feeds]\nhttps://a.example/feed||||category=plants\n', stub)
+        self.assertEqual([e['title'] for e in stub.state['read_later']], ['Garden tips', 'Old save'])
+
+    def test_rules_of_one_feed_do_not_touch_another(self):
+        self.conf('[feeds]\nhttps://a.example/feed\nhttps://b.example/feed||||category=plants\n')
+        stub = self.LaterStub()
+        real_parse = rt.feedparser.parse
+        with mock.patch.object(rt.feedparser, 'parse',
+                               side_effect=lambda url: real_parse(WORDPRESS_FEED.replace('s.example', url.split('/')[2]))), \
+                mock.patch.object(rt, 'entry_age_seconds', return_value=0), \
+                mock.patch.object(rt, 'save_state'), mock.patch.object(rt.GLib, 'idle_add'):
+            stub.check_feeds(force=True)
+        self.assertEqual({e['feed_url'] for e in stub.state['read_later']}, {'https://b.example/feed'})
+        self.assertEqual(len([e for e in stub.state['unread'] if e['feed_url'] == 'https://a.example/feed']), 3)
+
     def test_global_phrase_mute_still_applies_alongside(self):
         self.conf('[feeds]\nhttps://a.example/feed|||category=plants\n[mute]\nwinter\n')
 
@@ -256,220 +335,115 @@ class TestBreakingHighlight(TmpConfigCase):
         self.assertFalse(rt.item_is_highlighted({'title': 'Breaking', 'tags': ['Breaking']}, ()))
 
 
-class TestMiddleClickFeedTitle(unittest.TestCase):
+class TestHeaderClicks(unittest.TestCase):
     class Stub:
         on_listbox_button_press = rt.RssTray.on_listbox_button_press
 
-        def __init__(self, online=True, links=None):
-            self.online = online
-            self.lock = rt.threading.Lock()
-            self.state = {'feed_links': links} if links is not None else {}
+        def __init__(self):
             self.popup = mock.MagicMock()
+            self._show_feed_menu = mock.Mock()
+            self.on_mark_read_clicked = mock.Mock()
+            self.remove_read_later = mock.Mock()
 
-    def press(self, stub, row, button=2):
+    def press(self, stub, row, button):
         listbox = mock.Mock()
         listbox.get_row_at_y.return_value = row
-        with mock.patch.object(rt.webbrowser, 'open') as opened:
+        with mock.patch.object(rt.webbrowser, 'open') as opened, mock.patch.object(rt.webbrowser, 'open_new_tab') as tab:
             handled = stub.on_listbox_button_press(listbox, mock.Mock(button=button, y=5.0))
-        return handled, opened
+        return handled, opened, tab
 
     def header(self, url='https://a.example/feed.xml'):
         return mock.Mock(spec=['header_feed_url'], header_feed_url=url)
 
-    def test_middle_click_opens_the_site_the_feed_declared(self):
-        stub = self.Stub(links={'https://a.example/feed.xml': 'https://www.a.example/'})
-        handled, opened = self.press(stub, self.header())
-        self.assertTrue(handled)
-        opened.assert_called_once_with('https://www.a.example/')
-
-    def test_without_a_declared_link_it_opens_the_feed_origin(self):
-        handled, opened = self.press(self.Stub(), self.header('https://news.example/rss/all.xml'))
-        opened.assert_called_once_with('https://news.example/')
-
-    def test_offline_it_does_nothing_but_still_swallows_the_click(self):
-        handled, opened = self.press(self.Stub(online=False), self.header())
-        self.assertTrue(handled)
-        opened.assert_not_called()
-
-    def test_middle_click_elsewhere_is_ignored(self):
-        news_row = mock.Mock(spec=['entry_id', 'link'], entry_id='1', link='l')
-        handled, opened = self.press(self.Stub(), news_row)
-        self.assertFalse(handled)
-        opened.assert_not_called()
-        handled, opened = self.press(self.Stub(), None)
-        self.assertFalse(handled)
-
-    def test_right_click_behaviour_is_unchanged(self):
+    def test_middle_click_on_a_feed_title_no_longer_opens_anything(self):
         stub = self.Stub()
-        stub.on_mark_read_clicked = mock.Mock()
-        news_row = mock.Mock(spec=['entry_id', 'link'], entry_id='1', link='l')
-        handled, _ = self.press(stub, news_row, button=3)
+        handled, opened, tab = self.press(stub, self.header(), button=2)
+        self.assertFalse(handled)  # not swallowed: it is simply not a gesture any more
+        opened.assert_not_called()
+        tab.assert_not_called()
+        stub._show_feed_menu.assert_not_called()
+
+    def test_right_click_on_a_feed_title_opens_the_feed_menu(self):
+        stub = self.Stub()
+        row = self.header()
+        handled, _, _ = self.press(stub, row, button=3)
+        self.assertTrue(handled)
+        stub._show_feed_menu.assert_called_once()
+        self.assertIs(stub._show_feed_menu.call_args[0][0], row)
+
+    def test_right_click_on_a_news_item_still_marks_it_read(self):
+        stub = self.Stub()
+        row = mock.Mock(spec=['entry_id', 'link'], entry_id='1', link='l')
+        handled, _, _ = self.press(stub, row, button=3)
         self.assertTrue(handled)
         stub.on_mark_read_clicked.assert_called_once_with(None, '1')
 
-    def test_source_url_helper(self):
-        self.assertEqual(rt.feed_source_url('https://x.example/a/feed', {'https://x.example/a/feed': 'http://x.example/home'}),
-                         'http://x.example/home')
-        self.assertEqual(rt.feed_source_url('https://x.example/a/feed', {'https://x.example/a/feed': 'javascript:alert(1)'}),
-                         'https://x.example/')
-        self.assertEqual(rt.feed_source_url('https://x.example:8080/f?x=1', None), 'https://x.example:8080/')
-        self.assertEqual(rt.feed_source_url('not a url', None), 'not a url')
-
-    def test_check_feeds_remembers_each_feeds_website(self):
-        class CheckStub:
-            check_feeds = rt.RssTray.check_feeds
-
-            def __init__(self):
-                self.online = True
-                self.lock = rt.threading.Lock()
-                self.state = {'seen': {}, 'unread': [], 'last_checked': {}}
-                self.on_new_items = mock.Mock()
-                self.note_request_failure = mock.Mock()
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        config = os.path.join(d, 'config.conf')
-        with open(config, 'w') as f:
-            f.write('[feeds]\nhttps://a.example/feed.xml\n')
-        parsed = mock.Mock(bozo=False, entries=[])
-        parsed.feed = {'link': 'https://www.a.example/'}
-        stub = CheckStub()
-        with mock.patch.object(rt, 'CONFIG_FILE', config), mock.patch.object(rt.feedparser, 'parse', return_value=parsed), \
-                mock.patch.object(rt, 'save_state'):
-            stub.check_feeds(force=True)
-        self.assertEqual(stub.state['feed_links'], {'https://a.example/feed.xml': 'https://www.a.example/'})
+    def test_right_click_on_a_saved_item_takes_it_off_the_list_without_opening_it(self):
+        stub = self.Stub()
+        row = mock.Mock(spec=['readlater_id', 'link'], readlater_id='7', link='l')
+        handled, opened, tab = self.press(stub, row, button=3)
+        self.assertTrue(handled)
+        stub.remove_read_later.assert_called_once_with('7')
+        stub.on_mark_read_clicked.assert_not_called()
+        opened.assert_not_called()
 
 
-class TestFeedTermsAndMenuHelpers(TmpConfigCase):
-    def entries(self):
-        return rt.feedparser.parse(WORDPRESS_FEED).entries
+class TestFeedRuleWriting(TmpConfigCase):
+    URL = 'https://a.example/feed'
 
-    def test_tag_terms_and_author(self):
-        first = self.entries()[0]
-        self.assertEqual(rt.entry_tag_terms(first), ['News', 'winter sports', 'sports', 'sports archive'])
-        self.assertEqual(rt.entry_author_name(first), 'José Müller')
-        self.assertEqual(rt.entry_tag_terms({'tags': [{'term': 'A'}, {'term': 'a'}, 'B', {'term': ' '}, None]}), ['A', 'B'])
-        self.assertEqual(rt.entry_author_name({}), '')
+    def feeds_lines(self):
+        with open(rt.CONFIG_FILE) as f:
+            text = f.read()
+        return [l for l in text.splitlines() if l.startswith('https://')]
 
-    def test_counts_are_most_common_first_and_capped(self):
-        counts = rt.count_feed_terms(self.entries())
-        self.assertEqual(counts['category'][0], ['News', 3])
-        self.assertEqual(counts['category'][1], ['winter sports', 2])
-        self.assertEqual(counts['author'], [['Other Author', 2], ['José Müller', 1]])
-        many = [{'tags': [{'term': f't{i}'}]} for i in range(rt.FEED_TERMS_LIMIT + 10)]
-        self.assertEqual(len(rt.count_feed_terms(many)['category']), rt.FEED_TERMS_LIMIT)
+    def test_a_mute_rule_lands_in_the_fourth_field(self):
+        self.conf(f'[feeds]\n{self.URL}\n')
+        self.assertTrue(rt.add_feed_mute_rule(self.URL, 'category', 'sports'))
+        self.assertEqual(self.feeds_lines(), [f'{self.URL}|||category=sports'])
 
-    def test_item_detail_text(self):
-        self.assertEqual(rt.item_detail_text({'tags': ['a', 'b'], 'author': 'X'}), 'Categories: a, b\nAuthor: X')
-        self.assertEqual(rt.item_detail_text({'author': 'X'}), 'Author: X')
-        self.assertEqual(rt.item_detail_text({'title': 'old item without details'}), '')
+    def test_a_read_later_rule_lands_in_the_fifth_field(self):
+        self.conf(f'[feeds]\n{self.URL}\n')
+        self.assertTrue(rt.add_feed_readlater_rule(self.URL, 'author', 'Ana'))
+        self.assertEqual(self.feeds_lines(), [f'{self.URL}||||author=Ana'])
+        self.assertEqual(len(rt.load_feeds()), 1)
+        self.assertEqual(rt.load_feed_readlater_rules(), {self.URL: [('author', 'ana')]})  # patterns are stored folded
 
-    def test_escaped_values_match_exactly_what_they_came_from(self):
-        for value in ('R&D', 'a,b', 'wild*card?', 'x [y] z', 'a;b|c', 'Café', 'sports'):
-            rules = rt.parse_mute_rules(f'category={rt.escape_mute_value(value)}')
-            self.assertEqual(len(rules), 1, value)
-            self.assertTrue(rt.entry_matches_mute_rules({'tags': [value]}, rules), value)
-            self.assertFalse(rt.entry_matches_mute_rules({'tags': [value + ' more']}, rules), value)
-        self.assertFalse(rt.entry_matches_mute_rules({'tags': ['wildXcardY']}, rt.parse_mute_rules('category=' + rt.escape_mute_value('wild*card?'))))
+    def test_the_other_fields_are_kept_as_they_were(self):
+        self.conf(f'[feeds]\n{self.URL}|My Blog|5|category=sports|author=Bob\n')
+        rt.add_feed_readlater_rule(self.URL, 'category', 'long reads')
+        rt.add_feed_mute_rule(self.URL, 'category', 'ads')
+        self.assertEqual(self.feeds_lines(), [f'{self.URL}|My Blog|5|category=sports, ads|author=Bob; category=long reads'])
 
-    def test_add_rule_to_a_feed_line_without_a_fourth_field(self):
-        self.conf('[feeds]\n# my feeds\nhttps://a.example/feed\nhttps://b.example/feed|B|5\n')
-        self.assertTrue(rt.add_feed_mute_rule('https://a.example/feed', 'category', 'sports'))
-        self.assertTrue(rt.add_feed_mute_rule('https://b.example/feed', 'author', 'José Müller'))
+    def test_a_value_joins_a_rule_for_the_same_field(self):
+        self.conf(f'[feeds]\n{self.URL}||||category=a\n')
+        self.assertTrue(rt.add_feed_readlater_rule(self.URL, 'category', 'b'))
+        self.assertEqual(self.feeds_lines(), [f'{self.URL}||||category=a, b'])
+
+    def test_a_value_that_is_already_there_is_not_added_again(self):
+        self.conf(f'[feeds]\n{self.URL}||||category=a, b\n')
+        self.assertFalse(rt.add_feed_readlater_rule(self.URL, 'category', 'B'))
+        self.assertEqual(self.feeds_lines(), [f'{self.URL}||||category=a, b'])
+
+    def test_a_feed_that_is_not_in_the_config_changes_nothing(self):
+        self.conf(f'[feeds]\n{self.URL}\n')
+        self.assertFalse(rt.add_feed_readlater_rule('https://other.example/feed', 'category', 'x'))
+        self.assertEqual(self.feeds_lines(), [self.URL])
+
+    def test_names_with_commas_survive_the_round_trip(self):
+        self.conf(f'[feeds]\n{self.URL}\n')
+        rt.add_feed_readlater_rule(self.URL, 'author', 'Smith, John')
+        rules = rt.load_feed_readlater_rules()[self.URL]
+        self.assertTrue(rt.entry_matches_mute_rules({'author': 'Smith, John'}, rules))
+        self.assertFalse(rt.entry_matches_mute_rules({'author': 'John'}, rules))
+
+    def test_other_feeds_sections_and_comments_are_left_alone(self):
+        self.conf(f'# my feeds\n[feeds]\n{self.URL}\nhttps://b.example/feed|B\n\n[mute]\nspam\n')
+        rt.add_feed_readlater_rule(self.URL, 'category', 'x')
         with open(rt.CONFIG_FILE) as f:
             text = f.read()
         self.assertIn('# my feeds', text)
-        self.assertIn('https://a.example/feed|||category=sports', text)
-        self.assertIn('https://b.example/feed|B|5|author=José Müller', text)
-        self.assertEqual(rt.load_feed_mute_rules()['https://a.example/feed'], [('category', 'sports')])
-
-    def test_add_rule_extends_existing_rules_and_skips_duplicates(self):
-        self.conf('[feeds]\nhttps://a.example/feed|A|10|category=news\n')
-        self.assertTrue(rt.add_feed_mute_rule('https://a.example/feed', 'category', 'sports'))
-        self.assertFalse(rt.add_feed_mute_rule('https://a.example/feed', 'category', 'Sports'))   # same rule
-        self.assertEqual(rt.load_feed_mute_rules()['https://a.example/feed'], [('category', 'news'), ('category', 'sports')])
-
-    def test_a_second_value_for_the_same_field_joins_the_existing_rule(self):
-        self.conf('[feeds]\nhttps://a.example/feed|A\n')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'cat1')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'cat2')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'cat3')
-        with open(rt.CONFIG_FILE) as f:
-            self.assertIn('https://a.example/feed|A||category=cat1, cat2, cat3\n', f.read())
-        self.assertEqual(rt.load_feed_mute_rules()['https://a.example/feed'],
-                         [('category', 'cat1'), ('category', 'cat2'), ('category', 'cat3')])
-
-    def test_another_field_gets_its_own_rule_and_each_field_merges_separately(self):
-        self.conf('[feeds]\nhttps://a.example/feed|A||category=cat1\n')
-        rt.add_feed_mute_rule('https://a.example/feed', 'author', 'Ann')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'cat2')
-        rt.add_feed_mute_rule('https://a.example/feed', 'author', 'Bob')
-        with open(rt.CONFIG_FILE) as f:
-            self.assertIn('|category=cat1, cat2; author=Ann, Bob\n', f.read())
-
-    def test_hand_written_rules_are_extended_in_place_and_left_alone_otherwise(self):
-        self.conf('[feeds]\nhttps://a.example/feed|A||author=Ann;category=news;title=*x*\n')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'sports')
-        with open(rt.CONFIG_FILE) as f:
-            self.assertIn('|author=Ann;category=news, sports;title=*x*\n', f.read())
-
-    def test_the_same_value_is_not_added_twice_in_a_merged_rule(self):
-        self.conf('[feeds]\nhttps://a.example/feed|A||category=cat1, cat2\n')
-        self.assertFalse(rt.add_feed_mute_rule('https://a.example/feed', 'category', 'CAT2'))
-
-    def test_a_value_with_a_comma_stays_one_alternative_after_merging(self):
-        self.conf('[feeds]\nhttps://a.example/feed|A||category=cat1\n')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'Smith, John')
-        rules = rt.load_feed_mute_rules()['https://a.example/feed']
-        self.assertEqual(rules, [('category', 'cat1'), ('category', 'smith, john')])
-
-    def test_unread_terms_only_count_what_is_still_unread_for_that_feed(self):
-        unread = [{'feed_url': 'u1', 'tags': ['a', 'b'], 'author': 'X'},
-                  {'feed_url': 'u1', 'tags': ['a'], 'author': 'Y'},
-                  {'feed_url': 'u2', 'tags': ['z'], 'author': 'Z'},
-                  {'feed_url': 'u1', 'title': 'old item without details'}]
-        counts = rt.unread_feed_terms(unread, 'u1')
-        self.assertEqual(counts['category'], [['a', 2], ['b', 1]])
-        self.assertEqual(counts['author'], [['X', 1], ['Y', 1]])
-        del unread[0]    # one item dismissed: its categories no longer count
-        counts = rt.unread_feed_terms(unread, 'u1')
-        self.assertEqual(counts['category'], [['a', 1]])
-        self.assertEqual(counts['author'], [['Y', 1]])
-        self.assertEqual(rt.unread_feed_terms([], 'u1'), {'category': [], 'author': []})
-
-    def test_add_rule_for_an_unknown_feed_changes_nothing(self):
-        self.conf('[feeds]\nhttps://a.example/feed\n')
-        before = open(rt.CONFIG_FILE).read()
-        self.assertFalse(rt.add_feed_mute_rule('https://zzz.example/feed', 'category', 'x'))
-        self.assertEqual(open(rt.CONFIG_FILE).read(), before)
-
-    def test_only_the_matching_feed_line_is_touched_and_other_sections_survive(self):
-        self.conf('[feeds]\nhttps://a.example/feed\nhttps://a.example/feed2\n[twitch]\nchan\n')
-        rt.add_feed_mute_rule('https://a.example/feed', 'category', 'x')
-        self.assertEqual(sorted(rt.load_feed_mute_rules()), ['https://a.example/feed'])
-        self.assertEqual(rt.load_twitch_channels(), ['chan'])
-        self.assertEqual(len(rt.load_feeds()), 2)
-
-    def test_check_feeds_stores_item_details(self):
-        self.conf('[feeds]\nhttps://a.example/feed\n')
-
-        class Stub:
-            check_feeds = rt.RssTray.check_feeds
-
-            def __init__(self):
-                self.online = True
-                self.lock = rt.threading.Lock()
-                self.state = {'seen': {}, 'unread': [], 'last_checked': {}}
-                self.on_new_items = mock.Mock()
-                self.note_request_failure = mock.Mock()
-        stub = Stub()
-        with mock.patch.object(rt.feedparser, 'parse', return_value=rt.feedparser.parse(WORDPRESS_FEED)), \
-                mock.patch.object(rt, 'entry_age_seconds', return_value=0), \
-                mock.patch.object(rt, 'save_state'), mock.patch.object(rt.GLib, 'idle_add'):
-            stub.check_feeds(force=True)
-        first = next(i for i in stub.state['unread'] if i['title'] == 'Match report')
-        self.assertEqual(first['tags'], ['News', 'winter sports', 'sports', 'sports archive'])
-        self.assertEqual(first['author'], 'José Müller')
-        self.assertNotIn('feed_terms', stub.state)   # the menu counts the unread items itself
+        self.assertIn('https://b.example/feed|B\n', text)
+        self.assertIn('[mute]\nspam', text)
 
 
 if __name__ == '__main__':

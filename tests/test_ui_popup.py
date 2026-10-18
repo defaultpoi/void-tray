@@ -4,6 +4,15 @@ from unittest import mock
 
 from facade import rt
 
+REAL_AVAILABLE_ICON = rt._available_icon
+
+
+def setUpModule():
+    """Rows are built without a screen here, so the icon theme cannot be asked."""
+    patcher = mock.patch.object(rt, '_available_icon', return_value='icon-name')
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
 
 class TestPopupCss(unittest.TestCase):
     def _rules(self):
@@ -105,7 +114,8 @@ class TestBreakingPulse(unittest.TestCase):
             self._breaking_rows = []
             self._breaking_on = False
             self._highlight_words = ('breaking',)
-            self.on_mark_read_clicked = mock.Mock()
+            self.on_save_clicked = mock.Mock()
+            self.on_read_later_remove_clicked = mock.Mock()
 
     def make_row(self):
         return mock.MagicMock()
@@ -686,6 +696,192 @@ class TestSummaryRowActivation(unittest.TestCase):
             stub = self.Stub(online=online)
             stub.on_row_activated(None, mock.Mock(summary_header=True))
             stub._clear_update_summary.assert_called_once_with()
+
+
+class TestAvailableIcon(unittest.TestCase):
+    def theme(self, have):
+        theme = mock.Mock()
+        theme.has_icon.side_effect = lambda name: name in have
+        return theme
+
+    def test_the_first_icon_the_theme_has_wins(self):
+        with mock.patch.object(rt.Gtk.IconTheme, 'get_default', return_value=self.theme({'b', 'c'})):
+            self.assertEqual(REAL_AVAILABLE_ICON(('a', 'b', 'c')), 'b')
+
+    def test_without_any_of_them_the_last_is_used(self):
+        with mock.patch.object(rt.Gtk.IconTheme, 'get_default', return_value=self.theme(set())):
+            self.assertEqual(REAL_AVAILABLE_ICON(('a', 'b', 'c')), 'c')
+
+    def test_with_no_screen_to_ask_the_first_is_used(self):
+        with mock.patch.object(rt.Gtk.IconTheme, 'get_default', return_value=None):
+            self.assertEqual(REAL_AVAILABLE_ICON(('a', 'b', 'c')), 'a')
+
+    def test_the_save_and_remove_candidates_are_bookmark_and_minus_icons(self):
+        self.assertEqual(rt.SAVE_ICONS[0], 'bookmark-new-symbolic')
+        self.assertEqual(rt.REMOVE_ICONS[0], 'list-remove-symbolic')
+
+
+class TestRowFrontButton(unittest.TestCase):
+    class Stub:
+        build_row = rt.RssTray.build_row
+        _apply_breaking_state = rt.RssTray._apply_breaking_state
+
+        def __init__(self):
+            self._breaking_rows = []
+            self._breaking_on = False
+            self._highlight_words = ('breaking',)
+            self.on_save_clicked = mock.Mock(name='on_save_clicked')
+            self.on_read_later_remove_clicked = mock.Mock(name='on_remove')
+
+    ENTRY = {'id': '7', 'title': 'Breaking: a story', 'link': 'https://x.example/7'}
+
+    def build(self, saved):
+        stub = self.Stub()
+        buttons = []
+
+        def make_button(*a, **k):
+            button = mock.MagicMock()
+            buttons.append(button)
+            return button
+
+        with mock.patch.object(rt.Gtk, 'ListBoxRow', side_effect=lambda: mock.MagicMock(spec_set=None)), \
+                mock.patch.object(rt.Gtk, 'Box'), mock.patch.object(rt.Gtk, 'Button', side_effect=make_button), \
+                mock.patch.object(rt.Gtk, 'Image') as image, mock.patch.object(rt.Gtk, 'Label'), \
+                mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x), \
+                mock.patch.object(rt, '_available_icon', return_value='the-icon') as avail:
+            row = stub.build_row(self.ENTRY, saved=saved)
+        return stub, row, buttons, image, avail
+
+    def test_an_unread_rows_icon_saves_it_for_later(self):
+        stub, row, buttons, image, avail = self.build(saved=False)
+        avail.assert_called_once_with(rt.SAVE_ICONS)
+        image.new_from_icon_name.assert_called_once()
+        self.assertEqual(image.new_from_icon_name.call_args[0][0], 'the-icon')
+        buttons[0].set_tooltip_text.assert_called_once_with('Save for later')
+        buttons[0].connect.assert_called_once_with('clicked', stub.on_save_clicked, '7')
+
+    def test_an_unread_row_is_an_unread_row_with_an_entry_id(self):
+        _, row, _, _, _ = self.build(saved=False)
+        self.assertEqual((row.entry_id, row.link), ('7', 'https://x.example/7'))
+        self.assertFalse(hasattr(row, 'readlater_id') and isinstance(row.readlater_id, str))
+
+    def test_a_saved_rows_icon_removes_it_from_the_list(self):
+        stub, row, buttons, _, avail = self.build(saved=True)
+        avail.assert_called_once_with(rt.REMOVE_ICONS)
+        buttons[0].set_tooltip_text.assert_called_once_with('Remove from Read later')
+        buttons[0].connect.assert_called_once_with('clicked', stub.on_read_later_remove_clicked, '7')
+
+    def test_a_saved_row_is_marked_for_the_read_later_handlers_not_the_unread_ones(self):
+        _, row, _, _, _ = self.build(saved=True)
+        self.assertEqual((row.readlater_id, row.link), ('7', 'https://x.example/7'))
+        self.assertNotIsInstance(getattr(row, 'entry_id', None), str)
+
+    def test_saved_rows_do_not_pulse_even_with_a_highlighted_title(self):
+        stub, _, _, _, _ = self.build(saved=True)
+        self.assertEqual(stub._breaking_rows, [])
+        stub, _, _, _, _ = self.build(saved=False)
+        self.assertEqual(len(stub._breaking_rows), 1)
+
+
+class TestReadLaterSection(unittest.TestCase):
+    Stub = TestRefreshListOrphans.Stub
+
+    def entries(self, n):
+        return [{'id': str(i), 'title': f't{i}', 'link': f'l{i}', 'feed_url': 'f'} for i in range(n)]
+
+    def stub(self, state, **kwargs):
+        stub = self.Stub(state, **kwargs)
+        stub.add_read_later_rows = lambda items, is_first=False: stub.headers.append('__readlater__')
+        stub.add_update_summary_rows = lambda is_first=False: stub.headers.append('__summary__')
+        return stub
+
+    def refresh(self, stub):
+        with mock.patch.object(rt, 'Gtk', mock.MagicMock()), mock.patch.object(rt, 'load_feeds', return_value=[]), \
+                mock.patch.object(rt, 'load_highlight_words', return_value=()), mock.patch.object(rt, 'load_orphan_nudge', return_value=True):
+            stub.refresh_list()
+
+    def unread(self):
+        return [{'id': '1', 'title': 'Item', 'link': 'l', 'feed_url': 'f'}]
+
+    def test_it_follows_the_news_and_precedes_the_updates(self):
+        stub = self.stub({'unread': self.unread(), 'read_later': self.entries(2),
+                          'available_updates': [{'pkgname': 'p', 'id': '1', 'title': 't', 'link': ''}], 'orphans': ['o']})
+        self.refresh(stub)
+        self.assertEqual(stub.headers, ['f', '__readlater__', '__updates__', '__orphans__'])
+
+    def test_it_is_listed_even_when_nothing_is_unread(self):
+        stub = self.stub({'read_later': self.entries(1)})
+        self.refresh(stub)
+        self.assertEqual(stub.headers, ['__readlater__'])
+
+    def test_an_empty_list_has_no_section(self):
+        stub = self.stub({'unread': self.unread(), 'read_later': []})
+        self.refresh(stub)
+        self.assertEqual(stub.headers, ['f'])
+
+    def test_saved_items_never_keep_an_empty_popup_open(self):
+        stub = self.stub({'read_later': self.entries(3)}, popup_visible=True)
+        self.refresh(stub)
+        stub.popup.hide.assert_called_once()  # the same auto-close as before: only unread items hold it open
+
+    def test_the_section_has_its_own_header_with_the_count_and_a_row_per_item(self):
+        stub = self.Stub({})
+        added = []
+        stub.listbox.add.side_effect = added.append
+        rows = []
+        stub.build_row = mock.Mock(side_effect=lambda e, saved=False: rows.append((e['id'], saved)) or mock.MagicMock())
+        real = rt.RssTray.add_read_later_rows
+        with mock.patch.object(rt.Gtk, 'ListBoxRow'), mock.patch.object(rt.Gtk, 'Label'):
+            real(stub, self.entries(3), is_first=True)
+        self.assertEqual(stub.headers, ['__readlater__'])
+        self.assertEqual(rows, [('0', True), ('1', True), ('2', True)])
+        self.assertEqual(len(added), 4)  # header + three rows
+
+    def test_a_very_long_list_is_cut_with_a_count_of_the_rest(self):
+        stub = self.Stub({})
+        built = []
+        stub.build_row = mock.Mock(side_effect=lambda e, saved=False: built.append(e) or mock.MagicMock())
+        real = rt.RssTray.add_read_later_rows
+        with mock.patch.object(rt.Gtk, 'ListBoxRow'), mock.patch.object(rt.Gtk, 'Label') as label:
+            real(stub, self.entries(rt.MAX_LIST_ITEMS + 3))
+        self.assertEqual(len(built), rt.MAX_LIST_ITEMS)
+        label.assert_any_call(label='... and 3 more')
+
+    def test_the_header_names_the_count(self):
+        stub = self.Stub({})
+        titles = []
+        stub.build_header_row = lambda feed_url, title, **kw: titles.append((feed_url, title, kw)) or mock.MagicMock()
+        stub.build_row = mock.Mock(return_value=mock.MagicMock())
+        with mock.patch.object(rt.Gtk, 'ListBoxRow'), mock.patch.object(rt.Gtk, 'Label'):
+            rt.RssTray.add_read_later_rows(stub, self.entries(4))
+        self.assertEqual(titles[0][:2], ('__readlater__', 'Read later (4)'))
+        self.assertFalse(titles[0][2]['clickable'])
+
+
+class TestSavedRowActivation(unittest.TestCase):
+    class Stub:
+        on_row_activated = rt.RssTray.on_row_activated
+
+        def __init__(self, online=True):
+            self.online = online
+            self.active_installs = 0
+            self.orphan_status = None
+            self.orphans_expanded = False
+            self.open_read_later = mock.Mock()
+            self.refresh_list = mock.Mock()
+
+    def saved(self):
+        return mock.Mock(spec=['readlater_id', 'link'], readlater_id='7', link='https://x.example/7')
+
+    def test_clicking_a_saved_item_opens_it_and_takes_it_off_the_list(self):
+        stub = self.Stub()
+        stub.on_row_activated(None, self.saved())
+        stub.open_read_later.assert_called_once_with('7', 'https://x.example/7')
+
+    def test_offline_it_does_nothing_like_the_news_items(self):
+        stub = self.Stub(online=False)
+        stub.on_row_activated(None, self.saved())
+        stub.open_read_later.assert_not_called()
 
 
 if __name__ == '__main__':

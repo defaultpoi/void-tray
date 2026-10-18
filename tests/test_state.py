@@ -24,6 +24,16 @@ class TestState(TmpConfigCase):
         self.state_text(json.dumps({'orphans': ['libfoo', 5, None, 'libbar']}))
         self.assertEqual(rt.load_state()['orphans'], ['libfoo', 'libbar'])
 
+    def test_read_later_defaults_to_an_empty_list(self):
+        self.assertEqual(rt.load_state()['read_later'], [])
+
+    def test_read_later_must_be_a_list_of_complete_items(self):
+        self.state_text(json.dumps({'read_later': 'oops'}))
+        self.assertEqual(rt.load_state()['read_later'], [])
+        good = {'id': '1', 'title': 'T', 'link': 'https://x.example/1', 'feed_url': 'u', 'saved': 5.0, 'tags': ['a']}
+        self.state_text(json.dumps({'read_later': [good, {'id': '2'}, 'text', None, {'id': 3, 'title': 'T', 'link': 'l'}]}))
+        self.assertEqual(rt.load_state()['read_later'], [good])
+
     def test_corrupt_json_gives_defaults(self):
         self.state_text('{not json')
         self.assertEqual(rt.load_state()['unread'], [])

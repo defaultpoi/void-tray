@@ -15,7 +15,7 @@ from ..config import (
 from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN_PX
 from ..desktop import edit_file_externally, is_fullscreen_active, run_launcher_command
 from ..playback import open_twitch_stream, open_youtube_stream
-from ..rules import feed_source_url, item_detail_text, item_is_highlighted
+from ..rules import item_detail_text, item_is_highlighted
 from .timer import TIMER_RESERVED_HEIGHT_PX, format_timer_countdown
 
 
@@ -37,6 +37,21 @@ LAUNCHER_MAX_HEIGHT_PX = 300  # the Launch list scrolls beyond this
 LIST_BOTTOM_SPACE_PX = 85  # reserved under the last row for the timer slide (countdown mode)
 ORPHAN_LIST_MAX_NAMES = 30  # package names listed under an expanded orphaned-packages header
 SUMMARY_MAX_NAMES = 60  # package names listed in one line of the update summary
+# the icon in front of a news item saves it for later; the first one the icon theme has is used
+SAVE_ICONS = ('bookmark-new-symbolic', 'bookmark-new', 'starred-symbolic', 'mail-mark-read-symbolic')
+# and in front of a saved item it takes it off the list again
+REMOVE_ICONS = ('list-remove-symbolic', 'edit-delete-symbolic', 'window-close-symbolic')
+
+
+def _available_icon(candidates):
+    """The first of the icon names the current theme has, else the last one."""
+    theme = Gtk.IconTheme.get_default()
+    if theme is None:  # no screen to ask (a headless run): any name will do
+        return candidates[0]
+    for name in candidates:
+        if theme.has_icon(name):
+            return name
+    return candidates[-1]
 
 
 POPUP_CSS = """
@@ -54,6 +69,8 @@ row.breaking-on { background: #ffc9c9; }
 .schedule-warning button label { color: #000000; font-weight: normal; }
 .weather-bar label, .timer-bar label { color: #000000; }
 .timer-bar { background: #ffffff; }
+.menu-text { color: #000000; }
+.menu-text:disabled { color: #8a8a8a; }
 .timer-status { background: rgba(255, 255, 255, 0.9); border-radius: 4px; padding: 1px 6px; }
 .timer-status label { color: #333333; font-size: 11px; }
 """
@@ -441,6 +458,7 @@ class PopupMixin:
             unread = list(self.state.get('unread', []))
             available = list(self.state.get('available_updates', []))
             orphans = list(self.state.get('orphans', []))
+            read_later = list(self.state.get('read_later', []))
             live_channels = list(self.state.get('live_channels', []))
             live_youtube_channels = list(self.state.get('live_youtube_channels', []))
 
@@ -465,6 +483,8 @@ class PopupMixin:
             lbl.set_margin_bottom(8)
             row.add(lbl)
             self.listbox.add(row)
+            if read_later:  # saved items are listed even when nothing is unread
+                self.add_read_later_rows(read_later)
             if self.update_summary:
                 self.add_update_summary_rows()
             if show_orphans:
@@ -512,6 +532,10 @@ class PopupMixin:
                     row.add(lbl)
                     self.listbox.add(row)
 
+            if read_later:
+                self.add_read_later_rows(read_later, is_first=is_first_section)
+                is_first_section = False
+
             if available:
                 self.listbox.add(self.build_header_row(
                     '__updates__', 'Updates available',
@@ -533,6 +557,20 @@ class PopupMixin:
             if show_orphans:
                 self.add_orphan_rows(orphans, is_first=is_first_section)
         self.listbox.show_all()
+
+    def add_read_later_rows(self, read_later, is_first=False):
+        """The Read later list: saved items, newest first, under their own header. Neither
+        it nor its length keeps the popup open or counts in the badge."""
+        self.listbox.add(self.build_header_row(
+            '__readlater__', f'Read later ({len(read_later)})', is_first=is_first, clickable=False))
+        for entry in read_later[:MAX_LIST_ITEMS]:
+            self.listbox.add(self.build_row(entry, saved=True))
+        if len(read_later) > MAX_LIST_ITEMS:
+            row = Gtk.ListBoxRow()
+            row.set_selectable(False)
+            row.set_activatable(False)
+            row.add(Gtk.Label(label=f"... and {len(read_later) - MAX_LIST_ITEMS} more"))
+            self.listbox.add(row)
 
     def add_update_summary_rows(self, is_first=False):
         """Topgrade's closing summary after Install all: a header (click it to dismiss)
@@ -640,7 +678,7 @@ class PopupMixin:
             row.set_tooltip_text("Install all available updates")
         elif clickable:
             row.header_feed_url = feed_url
-            row.set_tooltip_text(f"Mark all '{feed_name}' items as read (middle-click: its website, right-click: menu)")
+            row.set_tooltip_text(f"Mark all '{feed_name}' items as read (right-click: menu)")
 
         row.set_margin_top(4 if is_first else 20)
 
@@ -701,9 +739,14 @@ class PopupMixin:
         row.add(box)
         return row
 
-    def build_row(self, entry):
+    def build_row(self, entry, saved=False):
+        """A news item row. In front is the button that saves it for later; on a row of
+        the Read later list (saved=True) it removes the item from that list instead."""
         row = Gtk.ListBoxRow()
-        row.entry_id = entry['id']
+        if saved:
+            row.readlater_id = entry['id']
+        else:
+            row.entry_id = entry['id']
         row.link = entry['link']
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
@@ -712,13 +755,14 @@ class PopupMixin:
         box.set_margin_top(0)
         box.set_margin_bottom(0)
 
-        mark_btn = Gtk.Button()
-        mark_btn.set_relief(Gtk.ReliefStyle.NONE)
-        mark_icon = Gtk.Image.new_from_icon_name('mail-mark-read-symbolic', Gtk.IconSize.MENU)
-        mark_btn.add(mark_icon)
-        mark_btn.set_tooltip_text('Mark as read')
-        mark_btn.connect('clicked', self.on_mark_read_clicked, entry['id'])
-        box.pack_start(mark_btn, False, False, 0)
+        front_btn = Gtk.Button()
+        front_btn.set_relief(Gtk.ReliefStyle.NONE)
+        icons, tip, callback = ((REMOVE_ICONS, 'Remove from Read later', self.on_read_later_remove_clicked) if saved
+                                else (SAVE_ICONS, 'Save for later', self.on_save_clicked))
+        front_btn.add(Gtk.Image.new_from_icon_name(_available_icon(icons), Gtk.IconSize.MENU))
+        front_btn.set_tooltip_text(tip)
+        front_btn.connect('clicked', callback, entry['id'])
+        box.pack_start(front_btn, False, False, 0)
 
         full_title = entry['title']
         truncated = len(full_title) > MAX_TITLE_LEN
@@ -733,7 +777,7 @@ class PopupMixin:
         if tooltip:
             row.set_tooltip_text(tooltip)
             label.set_tooltip_text(tooltip)
-        if item_is_highlighted(entry, self._highlight_words):
+        if not saved and item_is_highlighted(entry, self._highlight_words):
             self._breaking_rows.append(row)
             self._apply_breaking_state()
 
@@ -748,15 +792,6 @@ class PopupMixin:
         return False
 
     def on_listbox_button_press(self, listbox, event):
-        if event.button == 2:  # middle-click on a feed title: open that feed's website
-            row = listbox.get_row_at_y(int(event.y))
-            if row is not None and hasattr(row, 'header_feed_url'):
-                if self.online:  # offline, feed titles do nothing (like a left-click)
-                    with self.lock:
-                        links = self.state.get('feed_links')
-                    webbrowser.open(feed_source_url(row.header_feed_url, links if isinstance(links, dict) else {}))
-                return True
-            return False
         if event.button == 3:  # right-click
             row = listbox.get_row_at_y(int(event.y))
             if row is not None and hasattr(row, 'header_feed_url'):
@@ -764,6 +799,9 @@ class PopupMixin:
                 return True
             if row is not None and hasattr(row, 'entry_id'):
                 self.on_mark_read_clicked(None, row.entry_id)  # mark as read without opening
+                return True
+            if row is not None and hasattr(row, 'readlater_id'):
+                self.remove_read_later(row.readlater_id)  # off the Read later list without opening
                 return True
             if row is None:
                 if self.popup:
@@ -789,7 +827,7 @@ class PopupMixin:
                 self.remove_orphans(clean_cache=(action == 'remove_cache'))
             return
         if not self.online and (getattr(row, 'install_all_header', False)
-                                or hasattr(row, 'header_feed_url') or hasattr(row, 'entry_id')
+                                or hasattr(row, 'header_feed_url') or hasattr(row, 'entry_id') or hasattr(row, 'readlater_id')
                                 or hasattr(row, 'twitch_channel') or hasattr(row, 'youtube_channel')):
             return  # offline: news, feed headers, "install all" and live channels do nothing
         if getattr(row, 'install_all_header', False):
@@ -809,6 +847,9 @@ class PopupMixin:
                 self.popup.hide()
             open_youtube_stream(row.youtube_channel, getattr(row, 'youtube_quality', 'best'),
                                 title=getattr(row, 'live_title', None))
+            return
+        if hasattr(row, 'readlater_id'):
+            self.open_read_later(row.readlater_id, row.link)
             return
         if not hasattr(row, 'entry_id'):
             return
