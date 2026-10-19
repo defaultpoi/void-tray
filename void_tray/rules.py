@@ -144,6 +144,22 @@ def entry_author_name(entry):
     return author.strip() if isinstance(author, str) else ''
 
 
+def group_unread_by_feed(items, feed_urls):
+    """[(feed_url, [items])] for the popup's feed sections. The sections follow the order
+    of the feeds in config.conf (`feed_urls`), so it never depends on which items happen
+    to be unread: marking the newest item of a feed read must not move that feed below
+    another. Feeds that are not in the config (one removed since) come after, in the
+    order they first appear. Inside a section the items keep their order, newest first."""
+    rank = {}
+    for position, url in enumerate(feed_urls):
+        rank.setdefault(url, position)
+    groups = {}
+    for item in items:
+        groups.setdefault(item.get('feed_url', ''), []).append(item)
+    # sorted() is stable, so feeds with the same rank (all unknown ones) keep their first-seen order
+    return sorted(groups.items(), key=lambda group: rank.get(group[0], len(rank)))
+
+
 def count_feed_terms(entries):
     """{'category': [[term, n], ...], 'author': [[name, n], ...]} over the
     given items (feed entries or stored unread items), most common first

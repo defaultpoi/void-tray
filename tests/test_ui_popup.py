@@ -884,5 +884,38 @@ class TestSavedRowActivation(unittest.TestCase):
         stub.open_read_later.assert_not_called()
 
 
+class TestFeedSectionOrder(unittest.TestCase):
+    Stub = TestRefreshListOrphans.Stub
+    FEEDS = [('a', 'Feed A', None), ('b', 'Feed B', None), ('c', 'Feed C', None)]
+
+    def unread(self, *feeds):
+        return [{'id': str(i), 'title': f't{i}', 'link': 'l', 'feed_url': f} for i, f in enumerate(feeds)]
+
+    def headers(self, unread, feeds=None):
+        stub = self.Stub({'unread': unread})
+        with mock.patch.object(rt, 'Gtk', mock.MagicMock()), mock.patch.object(rt, 'load_feeds', return_value=feeds or self.FEEDS), \
+                mock.patch.object(rt, 'load_highlight_words', return_value=()), mock.patch.object(rt, 'load_orphan_nudge', return_value=True):
+            stub.refresh_list()
+        return stub.headers
+
+    def test_feeds_are_listed_in_config_order_whatever_the_newest_item_is(self):
+        self.assertEqual(self.headers(self.unread('c', 'b', 'a')), ['a', 'b', 'c'])
+
+    def test_marking_the_newest_item_read_leaves_the_feed_order_alone(self):
+        unread = self.unread('a', 'b', 'a', 'b', 'c')
+        before = self.headers(unread)
+        after = self.headers(unread[1:])  # a's newest item was read; the next in line is from b
+        self.assertEqual(before, ['a', 'b', 'c'])
+        self.assertEqual(after, before)
+
+    def test_a_feed_that_runs_out_of_unread_items_just_disappears(self):
+        unread = self.unread('a', 'b', 'c')
+        self.assertEqual(self.headers(unread[1:]), ['b', 'c'])
+
+    def test_the_order_is_the_same_when_only_part_of_a_long_list_is_shown(self):
+        unread = self.unread(*(['c'] * rt.MAX_LIST_ITEMS + ['a']))
+        self.assertEqual(self.headers(unread), ['c'])  # the cut falls inside c's items: a is not shown at all
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -446,5 +446,45 @@ class TestFeedRuleWriting(TmpConfigCase):
         self.assertIn('[mute]\nspam', text)
 
 
+class TestGroupUnreadByFeed(unittest.TestCase):
+    def items(self, *feeds):
+        return [{'id': str(i), 'feed_url': f} for i, f in enumerate(feeds)]
+
+    def urls(self, groups):
+        return [url for url, _ in groups]
+
+    def test_sections_follow_the_config_order_not_the_newest_item(self):
+        groups = rt.group_unread_by_feed(self.items('b', 'a', 'c'), ['a', 'b', 'c'])
+        self.assertEqual(self.urls(groups), ['a', 'b', 'c'])
+
+    def test_reading_the_newest_item_of_a_feed_does_not_move_it(self):
+        feeds = ['a', 'b', 'c']
+        before = rt.group_unread_by_feed(self.items('a', 'b', 'a', 'b', 'c'), feeds)
+        after = rt.group_unread_by_feed(self.items('b', 'a', 'b', 'c'), feeds)  # the top item of a was read
+        self.assertEqual(self.urls(before), self.urls(after))
+
+    def test_a_feed_with_nothing_unread_has_no_section_and_the_others_keep_their_places(self):
+        self.assertEqual(self.urls(rt.group_unread_by_feed(self.items('c', 'a'), ['a', 'b', 'c'])), ['a', 'c'])
+
+    def test_items_keep_their_order_inside_a_section(self):
+        groups = dict(rt.group_unread_by_feed(self.items('a', 'b', 'a', 'a'), ['a', 'b']))
+        self.assertEqual([i['id'] for i in groups['a']], ['0', '2', '3'])
+
+    def test_feeds_missing_from_the_config_follow_in_first_seen_order(self):
+        groups = rt.group_unread_by_feed(self.items('gone2', 'a', 'gone1', 'gone2'), ['a'])
+        self.assertEqual(self.urls(groups), ['a', 'gone2', 'gone1'])
+
+    def test_a_feed_listed_twice_takes_its_first_place(self):
+        groups = rt.group_unread_by_feed(self.items('b', 'a'), ['a', 'b', 'a'])
+        self.assertEqual(self.urls(groups), ['a', 'b'])
+
+    def test_items_without_a_feed_url_form_their_own_last_section(self):
+        groups = rt.group_unread_by_feed([{'id': '1'}, {'id': '2', 'feed_url': 'a'}], ['a'])
+        self.assertEqual(self.urls(groups), ['a', ''])
+
+    def test_nothing_unread_nothing_to_group(self):
+        self.assertEqual(rt.group_unread_by_feed([], ['a']), [])
+
+
 if __name__ == '__main__':
     unittest.main()

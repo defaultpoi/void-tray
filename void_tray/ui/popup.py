@@ -15,7 +15,7 @@ from ..config import (
 from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN_PX
 from ..desktop import edit_file_externally, is_fullscreen_active, run_launcher_command
 from ..playback import open_twitch_stream, open_youtube_stream
-from ..rules import item_detail_text, item_is_highlighted
+from ..rules import group_unread_by_feed, item_detail_text, item_is_highlighted
 from .timer import TIMER_RESERVED_HEIGHT_PX, format_timer_countdown
 
 
@@ -462,7 +462,8 @@ class PopupMixin:
             live_channels = list(self.state.get('live_channels', []))
             live_youtube_channels = list(self.state.get('live_youtube_channels', []))
 
-        feeds_map = {url: (custom_name or url) for url, custom_name, _interval in load_feeds()}
+        feeds = load_feeds()
+        feeds_map = {url: (custom_name or url) for url, custom_name, _interval in feeds}
         # orphaned packages never keep the popup open or fill it on their own: they are
         # shown below whatever else there is, and when the popup is opened by hand
         show_orphans = load_orphan_nudge() and bool(orphans or self.orphan_status)
@@ -506,21 +507,12 @@ class PopupMixin:
 
             if unread:
                 shown = unread[:MAX_LIST_ITEMS]
-                groups = {}
-                order = []
-                for entry in shown:
-                    feed_url = entry.get('feed_url', '')
-                    if feed_url not in groups:
-                        groups[feed_url] = []
-                        order.append(feed_url)
-                    groups[feed_url].append(entry)
-
-                for i, feed_url in enumerate(order):
+                for i, (feed_url, entries) in enumerate(group_unread_by_feed(shown, [url for url, _name, _interval in feeds])):
                     feed_name = feeds_map.get(feed_url, feed_url)
                     self.listbox.add(self.build_header_row(
                         feed_url, feed_name, is_first=(is_first_section and i == 0)
                     ))
-                    for entry in groups[feed_url]:
+                    for entry in entries:
                         self.listbox.add(self.build_row(entry))
                 is_first_section = False
 
