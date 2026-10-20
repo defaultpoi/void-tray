@@ -72,6 +72,8 @@ row.breaking-on { background: #ffc9c9; }
 .menu-text { color: #000000; }
 .menu-text:disabled { color: #8a8a8a; }
 .timer-status { background: rgba(255, 255, 255, 0.9); border-radius: 4px; padding: 1px 6px; }
+.missed-on { background: #ffc9c9; }
+.timer-status label.missed-text, label.missed-text { color: #b3261e; font-weight: bold; }
 .timer-status label { color: #333333; font-size: 11px; }
 """
 
@@ -313,9 +315,10 @@ class PopupMixin:
         status_label.set_xalign(1)
         status_label.set_justify(Gtk.Justification.RIGHT)
         status_label.show()
-        status_box = Gtk.Box()
+        status_box = Gtk.EventBox()  # an event box so a missed countdown can be clicked away
         status_box.get_style_context().add_class('timer-status')
         status_box.add(status_label)
+        status_box.connect('button-press-event', self.on_timer_status_clicked)
         status_box.set_halign(Gtk.Align.END)
         status_box.set_valign(Gtk.Align.END)
         status_box.set_margin_end(10)
@@ -324,7 +327,10 @@ class PopupMixin:
         content_overlay.add_overlay(status_box)
         content_overlay.set_overlay_pass_through(status_box, True)  # clicks reach the list underneath
         self.timer_status_box, self.timer_status_label = status_box, status_label
+        self.timer_overlay = content_overlay
         self._timer_status_text = None
+        self._apply_missed_style()  # a countdown missed while the popup was closed is still showing
+        self._update_timer_widgets()
         self._update_timer_status()
         # timer_box has no_show_all(True) so that the popup's own show_all()
         # doesn't reveal it prematurely — but that flag ALSO blocks show_all()
@@ -432,6 +438,11 @@ class PopupMixin:
         self.popup.move(max(x, 0), max(y, 0))
 
     def _apply_breaking_state(self):
+        # a missed countdown pulses in step with the breaking items
+        for widget in (self.timer_status_box, self.timer_label):
+            if widget is not None and self.timer_missed_boot is not None:
+                context = widget.get_style_context()
+                (context.add_class if self._breaking_on else context.remove_class)('missed-on')
         for row in self._breaking_rows:
             context = row.get_style_context()
             if self._breaking_on:
@@ -441,7 +452,7 @@ class PopupMixin:
 
     def _breaking_pulse_tick(self):
         """Pulses highlighted news rows -- only while the popup is showing."""
-        if self._breaking_rows and self.popup and self.popup.get_visible():
+        if (self._breaking_rows or self.timer_missed_boot is not None) and self.popup and self.popup.get_visible():
             self._breaking_on = not self._breaking_on
             self._apply_breaking_state()
         return True

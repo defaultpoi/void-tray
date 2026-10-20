@@ -63,7 +63,9 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self.update_summary = None  # topgrade's closing summary of the last Install all, shown until dismissed
         self.timer_remaining_seconds = 0
         self.timer_running = False
-        self.timer_deadline = None  # time_module.monotonic() value at which the timer fires
+        self.timer_deadline = None  # boot_clock() value at which the timer fires
+        self.timer_missed_boot = None  # boot_clock() value a countdown was due at when it ran out unseen (suspend)
+        self.timer_overlay = None
         self._timer_updating_ui = False
         self.timer_scale = None
         self.timer_label = None

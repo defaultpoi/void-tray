@@ -113,6 +113,9 @@ class TestBreakingPulse(unittest.TestCase):
             self.popup.get_visible.return_value = visible
             self._breaking_rows = []
             self._breaking_on = False
+            self.timer_missed_boot = None
+            self.timer_status_box = None
+            self.timer_label = None
             self._highlight_words = ('breaking',)
             self.on_save_clicked = mock.Mock()
             self.on_read_later_remove_clicked = mock.Mock()
@@ -228,7 +231,7 @@ class TestPopupReservesRoomForTheScheduleSlide(unittest.TestCase):
             rt.RssTray.build_popup_window(app)
         overlay = gtk.Overlay.return_value
         overlay.set_overlay_pass_through.assert_called_once()
-        self.assertIs(app.timer_status_box, gtk.Box.return_value)
+        self.assertIs(app.timer_status_box, gtk.EventBox.return_value)
         self.assertIs(app.timer_status_label, gtk.Label.return_value)
         gtk.Label.return_value.set_justify.assert_any_call(gtk.Justification.RIGHT)
         app._update_timer_status.assert_called()
@@ -729,6 +732,9 @@ class TestRowFrontButton(unittest.TestCase):
         def __init__(self):
             self._breaking_rows = []
             self._breaking_on = False
+            self.timer_missed_boot = None
+            self.timer_status_box = None
+            self.timer_label = None
             self._highlight_words = ('breaking',)
             self.on_save_clicked = mock.Mock(name='on_save_clicked')
             self.on_read_later_remove_clicked = mock.Mock(name='on_remove')
@@ -915,6 +921,45 @@ class TestFeedSectionOrder(unittest.TestCase):
     def test_the_order_is_the_same_when_only_part_of_a_long_list_is_shown(self):
         unread = self.unread(*(['c'] * rt.MAX_LIST_ITEMS + ['a']))
         self.assertEqual(self.headers(unread), ['c'])  # the cut falls inside c's items: a is not shown at all
+
+
+class TestMissedCountdownPulse(unittest.TestCase):
+    Stub = TestBreakingPulse.Stub
+
+    def stub(self, missed, visible=True):
+        stub = self.Stub(visible=visible)
+        stub.timer_missed_boot = missed
+        stub.timer_status_box = mock.MagicMock()
+        stub.timer_label = mock.MagicMock()
+        return stub
+
+    def test_a_missed_countdown_pulses_even_with_no_highlighted_news(self):
+        stub = self.stub(missed=5000.0)
+        stub._breaking_pulse_tick()
+        self.assertTrue(stub._breaking_on)
+        for widget in (stub.timer_status_box, stub.timer_label):
+            widget.get_style_context.return_value.add_class.assert_called_with('missed-on')
+        stub._breaking_pulse_tick()
+        for widget in (stub.timer_status_box, stub.timer_label):
+            widget.get_style_context.return_value.remove_class.assert_called_with('missed-on')
+
+    def test_no_pulse_while_the_popup_is_hidden(self):
+        stub = self.stub(missed=5000.0, visible=False)
+        stub._breaking_pulse_tick()
+        self.assertFalse(stub._breaking_on)
+
+    def test_nothing_pulses_without_a_miss(self):
+        stub = self.stub(missed=None)
+        stub._breaking_pulse_tick()
+        self.assertFalse(stub._breaking_on)  # no highlighted rows and no miss: nothing to pulse
+        stub.timer_status_box.get_style_context.assert_not_called()
+
+    def test_the_timer_widgets_do_not_pulse_for_highlighted_news_alone(self):
+        stub = self.stub(missed=None)
+        stub._breaking_rows = [mock.MagicMock()]
+        stub._breaking_pulse_tick()
+        stub.timer_status_box.get_style_context.assert_not_called()
+        stub.timer_label.get_style_context.assert_not_called()
 
 
 if __name__ == '__main__':

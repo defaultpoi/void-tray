@@ -51,6 +51,39 @@ def format_timer_duration(total_seconds):
     return f"{h} Hours, {m:02d} Minutes and {s:02d} Seconds"
 
 
+TIMER_MISSED_AFTER_SECONDS = 5  # a countdown found this far past its end was missed (the machine was asleep), not just fired
+
+
+def boot_clock():
+    """Seconds since boot, counting the time the machine spent suspended
+    (CLOCK_BOOTTIME). The ordinary monotonic clock stops during suspend, so a
+    countdown measured with it carries on after a wake as if no time had passed."""
+    clock = getattr(time_module, 'CLOCK_BOOTTIME', None)
+    if clock is not None:
+        try:
+            return time_module.clock_gettime(clock)
+        except OSError:
+            pass
+    return time_module.monotonic()
+
+
+def format_missed_ago(seconds):
+    """'missed 1 hour 12 minutes ago': how long ago a countdown ran out unseen."""
+    minutes = int(max(0, seconds) // 60)
+    if minutes < 1:
+        return 'missed less than a minute ago'
+    days, rest = divmod(minutes, 24 * 60)
+    hours, mins = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if mins and not days:  # past a day the minutes are noise
+        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
+    return f"missed {' '.join(parts)} ago"
+
+
 def format_clock(total_seconds):
     """hh:mm:ss, zero-padded, for the corner readout of a running countdown."""
     hours, rest = divmod(max(0, int(total_seconds)), 3600)
@@ -480,23 +513,31 @@ class TimerMixin:
 
     def _timer_tick(self):
         if self.timer_running and self.timer_deadline is not None:
-            left = self.timer_deadline - time_module.monotonic()
+            left = self.timer_deadline - boot_clock()
             self.timer_remaining_seconds = max(0, int(-(-left // 1)))  # ceil
             if self.timer_remaining_seconds <= 0:
+                deadline = self.timer_deadline
                 self.timer_running = False
                 self.timer_deadline = None
-                self._fire_timer_done()
+                if -left > TIMER_MISSED_AFTER_SECONDS:
+                    self._timer_missed(deadline)  # it ran out while the machine slept: too late to ring
+                else:
+                    self._fire_timer_done()
             self._update_timer_widgets()
+        elif self.timer_missed_boot is not None:
+            self._update_timer_widgets()  # the "ago" advances
         self._schedule_tick()
         self._update_timer_status()
         return True
 
     def _timer_status_lines(self):
         """What is counting right now, one entry per line: the running countdown as
-        hh:mm:ss, then each enabled schedule as its action label and the time it
+        hh:mm:ss (or, after a suspend, how long ago it was missed), then each enabled schedule as its action label and the time it
         next fires (a snoozed one at its snoozed time), soonest first."""
         lines = []
-        if self.timer_running and self.timer_remaining_seconds > 0:
+        if self.timer_missed_boot is not None:
+            lines.append(self._timer_missed_text())
+        elif self.timer_running and self.timer_remaining_seconds > 0:
             lines.append(format_clock(self.timer_remaining_seconds))
         now_ts = time_module.time()
         fired, overrides = self._schedule_state()
@@ -540,7 +581,47 @@ class TimerMixin:
         self.timer_scale.set_value(self.timer_remaining_seconds)
         self._timer_updating_ui = False
         if self.timer_mode == 'countdown':  # in Schedule mode the label shows the schedule summary
-            self.timer_label.set_text(format_timer_countdown(self.timer_remaining_seconds))
+            self.timer_label.set_text(self._timer_missed_text() if self.timer_missed_boot is not None
+                                      else format_timer_countdown(self.timer_remaining_seconds))
+
+    def _timer_missed_text(self):
+        return format_missed_ago(boot_clock() - self.timer_missed_boot)
+
+    def _timer_missed(self, deadline):
+        """The countdown's end passed while the machine slept. It does not ring, which
+        would be late and out of the blue; the slide and the corner readout say how
+        long ago it was and pulse like a breaking item until the miss is acknowledged."""
+        self.timer_missed_boot = deadline
+        self._apply_missed_style()
+
+    def _clear_timer_missed(self):
+        if self.timer_missed_boot is None:
+            return
+        self.timer_missed_boot = None
+        self._apply_missed_style()
+        self._update_timer_status()
+
+    def on_timer_status_clicked(self, _widget, _event):
+        """The corner readout can be clicked away while it shows a miss."""
+        if self.timer_missed_boot is None:
+            return False
+        self._clear_timer_missed()
+        self._update_timer_widgets()
+        return True
+
+    def _apply_missed_style(self):
+        missed = self.timer_missed_boot is not None
+        for widget in (self.timer_label, self.timer_status_label):
+            if widget is not None:
+                context = widget.get_style_context()
+                (context.add_class if missed else context.remove_class)('missed-text')
+        if not missed:
+            for widget in (self.timer_label, self.timer_status_box):
+                if widget is not None:
+                    widget.get_style_context().remove_class('missed-on')
+        if self.timer_overlay is not None and self.timer_status_box is not None:
+            # clicks reach the readout only while there is a miss to dismiss
+            self.timer_overlay.set_overlay_pass_through(self.timer_status_box, not missed)
 
     def on_timer_slider_changed(self, scale):
         if self._timer_updating_ui:
@@ -548,6 +629,7 @@ class TimerMixin:
         value = int(scale.get_value())
         self.timer_remaining_seconds = value
         self.timer_running = value > 0
-        self.timer_deadline = (time_module.monotonic() + value) if value > 0 else None
+        self._clear_timer_missed()  # moving the slider starts or cancels a countdown, so the old miss is acknowledged
+        self.timer_deadline = (boot_clock() + value) if value > 0 else None
         if self.timer_label is not None:
             self.timer_label.set_text(format_timer_countdown(value))

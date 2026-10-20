@@ -38,6 +38,7 @@ class TestTimerLabelUpdates(unittest.TestCase):
     class Stub:
         _update_timer_widgets = rt.RssTray._update_timer_widgets
         on_timer_slider_changed = rt.RssTray.on_timer_slider_changed
+        _clear_timer_missed = rt.RssTray._clear_timer_missed
 
         def __init__(self):
             self.timer_scale = mock.Mock()
@@ -46,6 +47,7 @@ class TestTimerLabelUpdates(unittest.TestCase):
             self.timer_remaining_seconds = 0
             self.timer_running = False
             self.timer_deadline = None
+            self.timer_missed_boot = None
             self._timer_updating_ui = False
 
     def test_dragging_the_slider_shows_the_end_time(self):
@@ -330,6 +332,7 @@ class TestTimerStatusLines(unittest.TestCase):
         def __init__(self, remaining=0, running=False, schedules=(), overrides=None):
             self.timer_remaining_seconds = remaining
             self.timer_running = running
+            self.timer_missed_boot = None
             self._schedules = list(schedules)
             self._overrides = overrides or {}
 
@@ -403,6 +406,7 @@ class TestTimerStatusWidget(unittest.TestCase):
             self.timer_visible = slide_open
             self.timer_box = mock.Mock()
             self.timer_running = False
+            self.timer_missed_boot = None
             self.timer_deadline = None
             self._lines = list(lines)
             self._timer_status_lines = lambda: list(self._lines)
@@ -451,6 +455,193 @@ class TestTimerStatusWidget(unittest.TestCase):
         stub.timer_status_box.set_visible.assert_called_with(False)
         stub.on_timer_toggle_clicked(None)  # close
         stub.timer_status_box.set_visible.assert_called_with(True)
+
+
+class TestBootClock(unittest.TestCase):
+    def test_it_reads_the_clock_that_keeps_counting_while_suspended(self):
+        with mock.patch.object(rt.time_module, 'clock_gettime', return_value=1234.5) as clock:
+            self.assertEqual(rt.boot_clock(), 1234.5)
+        clock.assert_called_once_with(rt.time_module.CLOCK_BOOTTIME)
+
+    def test_without_that_clock_the_monotonic_one_is_used(self):
+        with mock.patch.object(rt.time_module, 'CLOCK_BOOTTIME', create=True, new=None), \
+                mock.patch.object(rt.time_module, 'monotonic', return_value=77.0):
+            self.assertEqual(rt.boot_clock(), 77.0)
+
+    def test_a_clock_that_fails_falls_back_to_monotonic(self):
+        with mock.patch.object(rt.time_module, 'clock_gettime', side_effect=OSError), \
+                mock.patch.object(rt.time_module, 'monotonic', return_value=5.0):
+            self.assertEqual(rt.boot_clock(), 5.0)
+
+    def test_the_real_clock_keeps_up_with_the_monotonic_one_at_least(self):
+        self.assertGreaterEqual(rt.boot_clock(), rt.time_module.monotonic() - 1)
+
+
+class TestFormatMissedAgo(unittest.TestCase):
+    def test_hours_and_minutes(self):
+        self.assertEqual(rt.format_missed_ago(3600 + 12 * 60), 'missed 1 hour 12 minutes ago')
+        self.assertEqual(rt.format_missed_ago(2 * 3600 + 5 * 60), 'missed 2 hours 5 minutes ago')
+
+    def test_only_what_is_there_and_singular_where_it_should_be(self):
+        self.assertEqual(rt.format_missed_ago(2 * 3600), 'missed 2 hours ago')
+        self.assertEqual(rt.format_missed_ago(60), 'missed 1 minute ago')
+        self.assertEqual(rt.format_missed_ago(45 * 60), 'missed 45 minutes ago')
+
+    def test_under_a_minute(self):
+        self.assertEqual(rt.format_missed_ago(59), 'missed less than a minute ago')
+        self.assertEqual(rt.format_missed_ago(-3), 'missed less than a minute ago')
+
+    def test_seconds_are_dropped_not_rounded_up(self):
+        self.assertEqual(rt.format_missed_ago(3600 + 12 * 60 + 59), 'missed 1 hour 12 minutes ago')
+
+    def test_days_replace_the_minutes(self):
+        self.assertEqual(rt.format_missed_ago(26 * 3600 + 7 * 60), 'missed 1 day 2 hours ago')
+        self.assertEqual(rt.format_missed_ago(2 * 24 * 3600 + 30 * 60), 'missed 2 days ago')
+
+
+class TestMissedCountdown(unittest.TestCase):
+    class Stub:
+        _timer_tick = rt.RssTray._timer_tick
+        _timer_missed = rt.RssTray._timer_missed
+        _timer_missed_text = rt.RssTray._timer_missed_text
+        _timer_status_lines = rt.RssTray._timer_status_lines
+
+        def __init__(self, seconds=3600, started=1000.0):
+            self.timer_running = True
+            self.timer_deadline = started + seconds
+            self.timer_remaining_seconds = seconds
+            self.timer_missed_boot = None
+            self.timer_mode = 'countdown'
+            self.fired = 0
+            self._fire_timer_done = lambda: setattr(self, 'fired', self.fired + 1)
+            self._apply_missed_style = mock.Mock()
+            self._update_timer_widgets = mock.Mock()
+            self._update_timer_status = mock.Mock()
+            self._schedule_tick = mock.Mock()
+            self._schedule_settings = lambda: {'schedules': []}
+            self._schedule_state = lambda: ({}, {})
+
+    def tick(self, stub, boot_now):
+        with mock.patch.object(rt, 'boot_clock', return_value=boot_now):
+            return stub._timer_tick()
+
+    def test_a_countdown_that_runs_out_on_time_rings_as_before(self):
+        stub = self.Stub(seconds=10)
+        self.tick(stub, 1010.4)
+        self.assertEqual(stub.fired, 1)
+        self.assertIsNone(stub.timer_missed_boot)
+        self.assertFalse(stub.timer_running)
+
+    def test_a_countdown_found_past_its_end_after_a_suspend_is_missed_not_rung(self):
+        stub = self.Stub(seconds=1800)
+        self.tick(stub, 1000 + 1800 + 3 * 3600 + 12 * 60)  # woke 3 h 12 min after it was due
+        self.assertEqual(stub.fired, 0)  # no late alarm
+        self.assertEqual(stub.timer_missed_boot, 2800.0)
+        self.assertFalse(stub.timer_running)
+        self.assertEqual(stub.timer_remaining_seconds, 0)
+        self.assertIsNone(stub.timer_deadline)
+        stub._apply_missed_style.assert_called_once()
+
+    def test_the_line_between_late_and_missed_is_a_few_seconds(self):
+        on_the_line = self.Stub(seconds=10)
+        self.tick(on_the_line, 1010 + rt.TIMER_MISSED_AFTER_SECONDS)
+        self.assertEqual(on_the_line.fired, 1)  # a busy main loop is late, not asleep
+        past_it = self.Stub(seconds=10)
+        self.tick(past_it, 1010 + rt.TIMER_MISSED_AFTER_SECONDS + 0.5)
+        self.assertEqual(past_it.fired, 0)
+        self.assertIsNotNone(past_it.timer_missed_boot)
+
+    def test_a_countdown_that_is_still_running_after_the_wake_counts_the_time_slept(self):
+        stub = self.Stub(seconds=3600)
+        self.tick(stub, 1000 + 1800)  # half an hour passed, most of it suspended
+        self.assertEqual(stub.timer_remaining_seconds, 1800)
+        self.assertTrue(stub.timer_running)
+        self.assertEqual(stub.fired, 0)
+        self.assertIsNone(stub.timer_missed_boot)
+
+    def test_the_missed_text_keeps_growing_and_the_widgets_follow(self):
+        stub = self.Stub(seconds=60)
+        self.tick(stub, 1060 + 600)  # missed 10 minutes ago
+        stub._update_timer_widgets.reset_mock()
+        with mock.patch.object(rt, 'boot_clock', return_value=1060 + 600 + 120):
+            self.assertEqual(stub._timer_missed_text(), 'missed 12 minutes ago')
+        self.tick(stub, 1060 + 720)
+        stub._update_timer_widgets.assert_called_once()
+
+    def test_the_corner_readout_shows_the_miss_instead_of_a_countdown(self):
+        stub = self.Stub(seconds=60)
+        self.tick(stub, 1060 + 3600)
+        with mock.patch.object(rt, 'boot_clock', return_value=1060 + 3600), mock.patch.object(rt.time_module, 'time', return_value=at(10)):
+            self.assertEqual(stub._timer_status_lines(), ['missed 1 hour ago'])
+
+    def test_nothing_changes_for_an_idle_timer(self):
+        stub = self.Stub()
+        stub.timer_running = False
+        stub.timer_deadline = None
+        self.assertTrue(self.tick(stub, 99999))
+        self.assertEqual(stub.fired, 0)
+        self.assertIsNone(stub.timer_missed_boot)
+        stub._update_timer_widgets.assert_not_called()
+
+
+class TestAcknowledgingAMiss(unittest.TestCase):
+    class Stub:
+        on_timer_slider_changed = rt.RssTray.on_timer_slider_changed
+        on_timer_status_clicked = rt.RssTray.on_timer_status_clicked
+        _clear_timer_missed = rt.RssTray._clear_timer_missed
+        _apply_missed_style = rt.RssTray._apply_missed_style
+
+        def __init__(self, missed=5000.0):
+            self.timer_missed_boot = missed
+            self.timer_remaining_seconds = 0
+            self.timer_running = False
+            self.timer_deadline = None
+            self.timer_mode = 'countdown'
+            self._timer_updating_ui = False
+            self.timer_label = mock.MagicMock()
+            self.timer_scale = mock.MagicMock()
+            self.timer_status_label = mock.MagicMock()
+            self.timer_status_box = mock.MagicMock()
+            self.timer_overlay = mock.MagicMock()
+            self._update_timer_status = mock.Mock()
+            self._update_timer_widgets = mock.Mock()
+
+    def test_moving_the_slider_acknowledges_it_and_starts_the_new_countdown_on_the_boot_clock(self):
+        stub = self.Stub()
+        scale = mock.Mock()
+        scale.get_value.return_value = 600
+        with mock.patch.object(rt, 'boot_clock', return_value=7000.0):
+            stub.on_timer_slider_changed(scale)
+        self.assertIsNone(stub.timer_missed_boot)
+        self.assertEqual(stub.timer_deadline, 7600.0)
+        self.assertTrue(stub.timer_running)
+
+    def test_clicking_the_readout_dismisses_a_miss(self):
+        stub = self.Stub()
+        self.assertTrue(stub.on_timer_status_clicked(None, None))
+        self.assertIsNone(stub.timer_missed_boot)
+        stub._update_timer_widgets.assert_called()
+
+    def test_the_readout_ignores_clicks_when_there_is_no_miss(self):
+        stub = self.Stub(missed=None)
+        self.assertFalse(stub.on_timer_status_clicked(None, None))
+
+    def test_a_miss_is_styled_and_clickable_until_dismissed(self):
+        stub = self.Stub()
+        stub._apply_missed_style()
+        for widget in (stub.timer_label, stub.timer_status_label):
+            widget.get_style_context.return_value.add_class.assert_called_with('missed-text')
+        stub.timer_overlay.set_overlay_pass_through.assert_called_with(stub.timer_status_box, False)
+        stub.on_timer_status_clicked(None, None)
+        for widget in (stub.timer_label, stub.timer_status_label):
+            widget.get_style_context.return_value.remove_class.assert_any_call('missed-text')
+        stub.timer_status_box.get_style_context.return_value.remove_class.assert_any_call('missed-on')
+        stub.timer_overlay.set_overlay_pass_through.assert_called_with(stub.timer_status_box, True)  # clicks pass through again
+
+    def test_without_a_popup_nothing_breaks(self):
+        stub = self.Stub()
+        stub.timer_label = stub.timer_status_label = stub.timer_status_box = stub.timer_overlay = None
+        stub._apply_missed_style()  # no error
 
 
 if __name__ == '__main__':
