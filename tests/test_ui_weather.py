@@ -89,5 +89,41 @@ class TestMonoGlyph(unittest.TestCase):
         self.assertIn('\u2614\ufe0e', seg)
 
 
+
+class TestWeatherArrowStaysInPlace(unittest.TestCase):
+    class Stub:
+        rebuild_weather_bar = rt.RssTray.rebuild_weather_bar
+        on_weather_arrow_clicked = rt.RssTray.on_weather_arrow_clicked
+
+        def __init__(self, view):
+            self.weather_view = view
+            self.weather_data = {'forecast_days': []}
+            self.weather_box = mock.Mock()
+            self.weather_box.get_children.return_value = []
+            self.row = object()
+            self.build_forecast_weather_segments = lambda: []
+            self.build_today_weather_segments = lambda: []
+            self._build_weather_row = lambda segments, empty: self.row
+
+    def rebuilt(self, view):
+        stub, buttons = self.Stub(view), []
+        with mock.patch.object(rt, 'Gtk') as gtk, mock.patch.object(rt, 'weather_row_pad', return_value=''):
+            gtk.Button.side_effect = lambda label=None: buttons.append(mock.Mock(label=label)) or buttons[-1]
+            stub.rebuild_weather_bar()
+        packed = [call.args[0] for call in stub.weather_box.pack_start.call_args_list]
+        return stub, buttons, packed
+
+    def test_the_arrow_is_the_last_thing_in_the_bar_in_both_views(self):
+        for view, label in (('today', '\u203a'), ('forecast', '\u2039')):
+            stub, buttons, packed = self.rebuilt(view)
+            self.assertEqual([b.label for b in buttons], [label])
+            self.assertEqual(packed, [stub.row, buttons[0]])  # row first, arrow at the end
+
+    def test_each_arrow_switches_to_the_other_view(self):
+        for view, target in (('today', 'forecast'), ('forecast', 'today')):
+            stub, buttons, _ = self.rebuilt(view)
+            buttons[0].connect.assert_called_once_with('clicked', stub.on_weather_arrow_clicked, target)
+
+
 if __name__ == '__main__':
     unittest.main()

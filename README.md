@@ -25,7 +25,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
 ### Weather
 
-- **Weather** (Open-Meteo): today's temperature, high/low, wind and rain, with a 5-day forecast behind the `›` button. Refreshed every 30 minutes by default (`interval=<minutes>` in `[weather]`, minimum 5).
+- **Weather** (Open-Meteo): today's temperature, high/low, wind and rain, with a 5-day forecast behind the `›` button (it turns into `‹` in the same spot, so a second click on it goes back). Refreshed every 30 minutes by default (`interval=<minutes>` in `[weather]`, minimum 5).
 - **Severe-weather alerts** (optional, `alerts=true` in `[weather]`): polls the MeteoAlarm feed for your country on the same cycle as the weather, filtered to the region matching the configured coordinates (country and region are reverse-geocoded via OpenStreetMap once and then stored in `config.conf`; delete the `country=`/`region=` lines to resolve them again; Europe only, since MeteoAlarm only covers European countries; if your coordinates resolve to a country it doesn't cover, the app writes `alerts=false` into `config.conf` itself). An active alert is color-coded by severity (yellow/orange/red for moderate/severe/extreme) and pulses the matching weather value and the tray badge, faster for more severe alerts. With nothing unread the pulsing badge shows the current temperature instead of a 0.
 
 ### Package updates

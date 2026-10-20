@@ -266,17 +266,18 @@ class WeatherMixin:
             self.weather_box.remove(child)
 
         if self.weather_view == 'forecast':
-            back_btn = Gtk.Button(label='‹')
-            back_btn.set_tooltip_text('Back to today')
-            back_btn.connect('clicked', self.on_weather_arrow_clicked, 'today')
-            back_btn.set_valign(Gtk.Align.CENTER)
-            self.weather_box.pack_start(back_btn, False, False, 0)
-
             pad = weather_row_pad(self.weather_box)
             empty = (f'<span size="large">Weather unavailable{pad}</span>' if not self.weather_data
                      else f'<span size="large">Forecast unavailable{pad}</span>')
             row = self._build_weather_row(self.build_forecast_weather_segments(), empty)
             self.weather_box.pack_start(row, True, True, 0)
+
+            # the same slot as the forward arrow, so the button stays under the pointer
+            back_btn = Gtk.Button(label='‹')
+            back_btn.set_tooltip_text('Back to today')
+            back_btn.connect('clicked', self.on_weather_arrow_clicked, 'today')
+            back_btn.set_valign(Gtk.Align.CENTER)
+            self.weather_box.pack_start(back_btn, False, False, 0)
         else:
             row = self._build_weather_row(
                 self.build_today_weather_segments(),
