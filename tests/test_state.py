@@ -60,6 +60,17 @@ class TestState(TmpConfigCase):
         self.assertEqual(s['unread'], [{'id': 'a'}])
         self.assertEqual(s['seen'], {'a': 1})
 
+    def test_a_saved_countdown_end_is_kept_only_when_it_is_a_finite_number(self):
+        self.state_text(json.dumps({'timer_end': 1760000000.5}))
+        self.assertEqual(rt.load_state()['timer_end'], 1760000000.5)
+        for bad in ('soon', None, True, [5], {'a': 1}):
+            self.state_text(json.dumps({'timer_end': bad}))
+            self.assertNotIn('timer_end', rt.load_state())
+        self.state_text('{"timer_end": NaN}')  # Python's json accepts these
+        self.assertNotIn('timer_end', rt.load_state())
+        self.state_text('{"timer_end": Infinity}')
+        self.assertNotIn('timer_end', rt.load_state())
+
     def test_save_roundtrip_leaves_no_tmp_file(self):
         rt.save_state({'a': 1})
         with open(rt.STATE_FILE) as f:

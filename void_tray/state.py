@@ -1,6 +1,7 @@
 """state.json: loading with validation and atomic saving."""
 
 import json
+import math
 import os
 
 from .constants import CONFIG_DIR
@@ -44,6 +45,10 @@ def load_state():
         state['live_youtube_channels'] = []
     if not isinstance(state.get('last_checked'), dict):
         state['last_checked'] = {}
+    # the running countdown's end as a wall-clock timestamp; anything else is dropped
+    end = state.get('timer_end')
+    if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end):
+        state.pop('timer_end', None)
 
     return state
 

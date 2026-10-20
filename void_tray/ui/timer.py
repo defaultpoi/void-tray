@@ -6,7 +6,7 @@ import time as time_module
 from datetime import datetime
 
 from ..gi_env import GLib, Gtk
-from ..config import load_actions
+from ..config import load_actions, load_timer_settings
 from ..constants import CONFIG_FILE, NEW_SCHEDULE, TIMER_HEIGHT_COUNTDOWN_PX, _DAY_NAMES
 from ..desktop import play_notification_sound, run_launcher_command
 from ..log import _log
@@ -65,6 +65,16 @@ def boot_clock():
         except OSError:
             pass
     return time_module.monotonic()
+
+
+def countdown_left_after_restart(timer_end, now_wall, max_seconds):
+    """Seconds a countdown saved by an earlier run has left, negative once its end
+    has passed, or None when nothing was counting. `timer_end` is the wall-clock
+    time it ends at (the boot clock restarts with the machine, the wall clock
+    does not); a value further away than the slider can go is cut to that."""
+    if isinstance(timer_end, bool) or not isinstance(timer_end, (int, float)) or not math.isfinite(timer_end):
+        return None
+    return min(timer_end - now_wall, max_seconds)
 
 
 def format_missed_ago(seconds):
@@ -519,6 +529,7 @@ class TimerMixin:
                 deadline = self.timer_deadline
                 self.timer_running = False
                 self.timer_deadline = None
+                self.timer_end_wall = None
                 if -left > TIMER_MISSED_AFTER_SECONDS:
                     self._timer_missed(deadline)  # it ran out while the machine slept: too late to ring
                 else:
@@ -526,6 +537,7 @@ class TimerMixin:
             self._update_timer_widgets()
         elif self.timer_missed_boot is not None:
             self._update_timer_widgets()  # the "ago" advances
+        self._persist_countdown()
         self._schedule_tick()
         self._update_timer_status()
         return True
@@ -584,6 +596,36 @@ class TimerMixin:
             self.timer_label.set_text(self._timer_missed_text() if self.timer_missed_boot is not None
                                       else format_timer_countdown(self.timer_remaining_seconds))
 
+    def _persist_countdown(self):
+        """Keep the countdown's end in state.json so a restart picks it up. Called
+        from the 1 s tick rather than on every slider event, so dragging the
+        slider does not write the file once per step."""
+        end = self.timer_end_wall
+        with self.lock:
+            if self.state.get('timer_end') == end:
+                return
+            if end is None:
+                self.state.pop('timer_end', None)
+            else:
+                self.state['timer_end'] = end
+            save_state(self.state)
+
+    def _restore_countdown(self):
+        """Carry on with a countdown that was running when the app last ended. The
+        remaining time is worked out from the saved wall-clock end; one that ran out
+        while the app was not running is handled by the next tick like a suspended
+        one (a miss, or a ring if it is only a few seconds late)."""
+        with self.lock:
+            saved = self.state.get('timer_end')
+        left = countdown_left_after_restart(saved, time_module.time(), load_timer_settings()['max_seconds'])
+        if left is None:
+            self.timer_end_wall = None
+            return
+        self.timer_end_wall = saved
+        self.timer_running = True
+        self.timer_deadline = boot_clock() + left
+        self.timer_remaining_seconds = max(0, math.ceil(left))
+
     def _timer_missed_text(self):
         return format_missed_ago(boot_clock() - self.timer_missed_boot)
 
@@ -631,5 +673,6 @@ class TimerMixin:
         self.timer_running = value > 0
         self._clear_timer_missed()  # moving the slider starts or cancels a countdown, so the old miss is acknowledged
         self.timer_deadline = (boot_clock() + value) if value > 0 else None
+        self.timer_end_wall = round(time_module.time() + value, 3) if value > 0 else None  # saved by the next tick
         if self.timer_label is not None:
             self.timer_label.set_text(format_timer_countdown(value))

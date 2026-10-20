@@ -1,3 +1,4 @@
+import os
 import unittest
 from datetime import datetime
 from unittest import mock
@@ -411,6 +412,7 @@ class TestTimerStatusWidget(unittest.TestCase):
             self._lines = list(lines)
             self._timer_status_lines = lambda: list(self._lines)
             self._schedule_tick = mock.Mock()
+            self._persist_countdown = mock.Mock()
 
     def test_the_lines_become_right_aligned_rows_and_the_box_is_shown(self):
         stub = self.Stub(['01:00:00', 'Suspend 23:59'])
@@ -518,6 +520,8 @@ class TestMissedCountdown(unittest.TestCase):
             self._update_timer_widgets = mock.Mock()
             self._update_timer_status = mock.Mock()
             self._schedule_tick = mock.Mock()
+            self._persist_countdown = mock.Mock()
+            self.timer_end_wall = None
             self._schedule_settings = lambda: {'schedules': []}
             self._schedule_state = lambda: ({}, {})
 
@@ -642,6 +646,150 @@ class TestAcknowledgingAMiss(unittest.TestCase):
         stub = self.Stub()
         stub.timer_label = stub.timer_status_label = stub.timer_status_box = stub.timer_overlay = None
         stub._apply_missed_style()  # no error
+
+
+
+class TestCountdownLeftAfterRestart(unittest.TestCase):
+    def test_a_countdown_still_running_has_the_rest_of_its_time_left(self):
+        self.assertEqual(rt.countdown_left_after_restart(1000 + 600.0, 1000 + 100.0, 7200), 500.0)
+
+    def test_one_that_ended_while_the_app_was_closed_is_negative(self):
+        self.assertEqual(rt.countdown_left_after_restart(1000.0, 1000 + 90.0, 7200), -90.0)
+
+    def test_an_end_further_away_than_the_slider_goes_is_cut_to_the_maximum(self):
+        self.assertEqual(rt.countdown_left_after_restart(10 ** 9, 1000.0, 7200), 7200)
+
+    def test_nothing_saved_or_something_unusable_means_nothing_was_counting(self):
+        for bad in (None, 'x', True, float('nan'), float('inf'), [1]):
+            self.assertIsNone(rt.countdown_left_after_restart(bad, 1000.0, 7200))
+
+
+class TestCountdownSurvivesARestart(TmpConfigCase):
+    class Stub:
+        _persist_countdown = rt.RssTray._persist_countdown
+        _restore_countdown = rt.RssTray._restore_countdown
+        _timer_tick = rt.RssTray._timer_tick
+        _timer_missed = rt.RssTray._timer_missed
+        _timer_missed_text = rt.RssTray._timer_missed_text
+        on_timer_slider_changed = rt.RssTray.on_timer_slider_changed
+        _clear_timer_missed = rt.RssTray._clear_timer_missed
+
+        def __init__(self, state=None):
+            import threading
+            self.lock = threading.Lock()
+            self.state = state if state is not None else {}
+            self.timer_running = False
+            self.timer_deadline = None
+            self.timer_end_wall = None
+            self.timer_remaining_seconds = 0
+            self.timer_missed_boot = None
+            self.timer_mode = 'countdown'
+            self._timer_updating_ui = False
+            self.timer_label = None
+            self.fired = 0
+            self._fire_timer_done = lambda: setattr(self, 'fired', self.fired + 1)
+            self._apply_missed_style = mock.Mock()
+            self._update_timer_widgets = mock.Mock()
+            self._update_timer_status = mock.Mock()
+            self._schedule_tick = mock.Mock()
+
+    def saved(self):
+        import json
+        with open(rt.STATE_FILE) as f:
+            return json.load(f)
+
+    def test_a_restart_carries_on_with_the_time_that_is_left(self):
+        stub = self.Stub({'timer_end': 5000.0})
+        with mock.patch.object(rt.time_module, 'time', return_value=4000.25), mock.patch.object(rt, 'boot_clock', return_value=300.0):
+            stub._restore_countdown()
+        self.assertTrue(stub.timer_running)
+        self.assertEqual(stub.timer_deadline, 300.0 + 999.75)  # on the boot clock of this run
+        self.assertEqual(stub.timer_remaining_seconds, 1000)
+        self.assertEqual(stub.timer_end_wall, 5000.0)
+        self.assertEqual(stub.state, {'timer_end': 5000.0})  # restoring rewrites nothing
+
+    def test_a_restart_with_nothing_saved_starts_idle(self):
+        stub = self.Stub()
+        stub._restore_countdown()
+        self.assertFalse(stub.timer_running)
+        self.assertIsNone(stub.timer_deadline)
+        self.assertEqual(stub.timer_remaining_seconds, 0)
+
+    def test_the_restored_time_is_cut_to_the_configured_maximum(self):
+        self.conf('[timer]\nmax=30\n')
+        stub = self.Stub({'timer_end': 10 ** 9})
+        with mock.patch.object(rt.time_module, 'time', return_value=0.0), mock.patch.object(rt, 'boot_clock', return_value=50.0):
+            stub._restore_countdown()
+        self.assertEqual(stub.timer_remaining_seconds, 30 * 60)
+        self.assertEqual(stub.timer_deadline, 50.0 + 30 * 60)
+
+    def test_one_that_ran_out_while_the_app_was_closed_is_a_miss_not_a_late_ring(self):
+        stub = self.Stub({'timer_end': 1000.0})
+        with mock.patch.object(rt.time_module, 'time', return_value=1000.0 + 3 * 3600), mock.patch.object(rt, 'boot_clock', return_value=40.0):
+            stub._restore_countdown()
+            stub._timer_tick()
+            self.assertEqual(stub.fired, 0)
+            self.assertEqual(stub.timer_missed_boot, 40.0 - 3 * 3600)
+            self.assertEqual(stub._timer_missed_text(), 'missed 3 hours ago')
+        self.assertFalse(stub.timer_running)
+        self.assertEqual(self.saved(), {})  # the miss is not saved: restarting again must not repeat it
+
+    def test_one_that_ran_out_a_second_before_the_restart_still_rings(self):
+        stub = self.Stub({'timer_end': 1000.0})
+        with mock.patch.object(rt.time_module, 'time', return_value=1001.0), mock.patch.object(rt, 'boot_clock', return_value=40.0):
+            stub._restore_countdown()
+            stub._timer_tick()
+        self.assertEqual(stub.fired, 1)
+        self.assertIsNone(stub.timer_missed_boot)
+
+    def test_moving_the_slider_saves_the_end_on_the_next_tick(self):
+        stub = self.Stub()
+        scale = mock.Mock()
+        scale.get_value.return_value = 600
+        with mock.patch.object(rt.time_module, 'time', return_value=2000.0), mock.patch.object(rt, 'boot_clock', return_value=10.0):
+            stub.on_timer_slider_changed(scale)
+        self.assertFalse(os.path.exists(rt.STATE_FILE))  # dragging does not write the file per step
+        with mock.patch.object(rt, 'boot_clock', return_value=11.0):
+            stub._timer_tick()
+        self.assertEqual(self.saved(), {'timer_end': 2600.0})
+
+    def test_dragging_saves_only_where_the_slider_ended(self):
+        stub = self.Stub()
+        scale = mock.Mock()
+        with mock.patch.object(rt.time_module, 'time', return_value=2000.0), mock.patch.object(rt, 'boot_clock', return_value=10.0):
+            for value in (60, 120, 900):
+                scale.get_value.return_value = value
+                stub.on_timer_slider_changed(scale)
+        with mock.patch.object(rt, 'boot_clock', return_value=11.0):
+            stub._timer_tick()
+        self.assertEqual(self.saved(), {'timer_end': 2900.0})
+
+    def test_an_unchanged_countdown_does_not_rewrite_the_file_every_second(self):
+        stub = self.Stub({'timer_end': 5000.0})
+        stub.timer_end_wall = 5000.0
+        with mock.patch.object(rt, 'save_state') as save:
+            stub._persist_countdown()
+            stub._persist_countdown()
+        save.assert_not_called()
+
+    def test_cancelling_with_the_slider_forgets_it(self):
+        stub = self.Stub({'timer_end': 5000.0, 'unread': []})
+        stub.timer_end_wall = 5000.0
+        scale = mock.Mock()
+        scale.get_value.return_value = 0
+        stub.on_timer_slider_changed(scale)
+        with mock.patch.object(rt, 'boot_clock', return_value=1.0):
+            stub._timer_tick()
+        self.assertEqual(self.saved(), {'unread': []})  # other keys untouched
+
+    def test_a_countdown_that_rings_is_forgotten(self):
+        stub = self.Stub()
+        stub.timer_running, stub.timer_deadline, stub.timer_end_wall = True, 110.0, 5000.0
+        stub.state['timer_end'] = 5000.0
+        with mock.patch.object(rt, 'boot_clock', return_value=110.2):
+            stub._timer_tick()
+        self.assertEqual(stub.fired, 1)
+        self.assertEqual(self.saved(), {})
 
 
 if __name__ == '__main__':

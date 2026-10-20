@@ -64,6 +64,7 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self.timer_remaining_seconds = 0
         self.timer_running = False
         self.timer_deadline = None  # boot_clock() value at which the timer fires
+        self.timer_end_wall = None  # the same moment as a wall-clock timestamp, kept in state.json across restarts
         self.timer_missed_boot = None  # boot_clock() value a countdown was due at when it ran out unseen (suspend)
         self.timer_overlay = None
         self._timer_updating_ui = False
@@ -92,6 +93,7 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self._schedule_resync = True
 
         self._apply_compact_css()
+        self._restore_countdown()
 
         self.status_icon = Gtk.StatusIcon()
         self.status_icon.connect('activate', self.toggle_popup)
