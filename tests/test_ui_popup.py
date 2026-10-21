@@ -66,6 +66,7 @@ class TestPopupRebuildRules(unittest.TestCase):
             self.probe_connectivity = mock.Mock()
             self.check_orphans_if_due = mock.Mock()
             self.position_popup = mock.Mock()
+            self._fit_popup_width = mock.Mock()
             self._update_scroller_max_height = mock.Mock()
             self._launcher_open = True
             self.old_popup = self.popup
@@ -992,6 +993,111 @@ class TestMissedCountdownPulse(unittest.TestCase):
         stub._breaking_pulse_tick()
         stub.timer_status_box.get_style_context.assert_not_called()
         stub.timer_label.get_style_context.assert_not_called()
+
+
+
+class TestPopupWidth(unittest.TestCase):
+    """The popup is as wide as the widest weather view needs, so a long forecast
+    never pushes it past the screen's right edge."""
+
+    class Stub:
+        _fit_popup_width = rt.RssTray._fit_popup_width
+        _refit_open_popup = rt.RssTray._refit_open_popup
+        position_popup = rt.RssTray.position_popup
+
+        def __init__(self, widths, view='today', visible=True):
+            self.widths = widths  # the weather bar's width per view
+            self.weather_view = view
+            self.popup_width = rt.WINDOW_WIDTH
+            self.built = []
+            self.popup = mock.MagicMock()
+            self.popup.get_visible.return_value = visible
+            self.popup.get_size.return_value = (rt.WINDOW_WIDTH, 640)
+            self.weather_box = mock.Mock()
+            self.weather_box.get_preferred_width.side_effect = lambda: (self.widths[self.weather_view], self.widths[self.weather_view])
+            self.status_icon = mock.Mock()
+            self.status_icon.get_geometry.return_value = (False, None, None, None)
+
+        def rebuild_weather_bar(self):
+            self.built.append(self.weather_view)
+
+    def test_a_wide_forecast_widens_the_popup_for_both_views(self):
+        stub = self.Stub({'today': 417, 'forecast': 531})
+        self.assertTrue(stub._fit_popup_width())
+        self.assertEqual(stub.popup_width, 531)
+        stub.popup.set_default_size.assert_called_once_with(531, -1)
+
+    def test_it_does_not_depend_on_which_view_is_showing(self):
+        for view in ('today', 'forecast'):
+            stub = self.Stub({'today': 417, 'forecast': 531}, view=view)
+            stub._fit_popup_width()
+            self.assertEqual(stub.popup_width, 531, view)
+            self.assertEqual(stub.weather_view, view)
+            self.assertEqual(stub.built[-1], view)  # the bar is left showing what it showed
+
+    def test_narrow_content_keeps_the_default_width(self):
+        stub = self.Stub({'today': 417, 'forecast': 432})
+        self.assertFalse(stub._fit_popup_width())
+        self.assertEqual(stub.popup_width, rt.WINDOW_WIDTH)
+        stub.popup.set_default_size.assert_called_once_with(rt.WINDOW_WIDTH, -1)
+
+    def test_it_says_whether_the_width_changed(self):
+        stub = self.Stub({'today': 417, 'forecast': 531})
+        self.assertTrue(stub._fit_popup_width())
+        self.assertFalse(stub._fit_popup_width())
+        stub.widths['forecast'] = 612
+        self.assertTrue(stub._fit_popup_width())
+
+    def test_an_open_popup_is_resized_and_put_back_against_the_right_edge(self):
+        stub = self.Stub({'today': 417, 'forecast': 531})
+        stub.position_popup = mock.Mock()
+        stub._refit_open_popup()
+        stub.popup.resize.assert_called_once_with(531, 640)  # the height it has is kept
+        stub.position_popup.assert_called_once_with()
+
+    def test_an_open_popup_whose_width_did_not_change_is_left_alone(self):
+        stub = self.Stub({'today': 417, 'forecast': 432})
+        stub.position_popup = mock.Mock()
+        stub._refit_open_popup()
+        stub.popup.resize.assert_not_called()
+        stub.position_popup.assert_not_called()
+
+    def test_a_hidden_or_missing_popup_is_not_touched(self):
+        stub = self.Stub({'today': 417, 'forecast': 531}, visible=False)
+        stub._refit_open_popup()
+        self.assertEqual(stub.built, [])
+        stub.popup = None
+        stub._refit_open_popup()  # no popup at all: nothing to do
+
+    def place(self, width, screen_width=1920, screen_x=0):
+        stub = self.Stub({'today': 417, 'forecast': 417})
+        stub.popup_width = width
+        geo = mock.Mock(x=screen_x, y=0, width=screen_width, height=1080)
+        with mock.patch.object(rt.Gdk.Display, 'get_default') as display:
+            display.return_value.get_primary_monitor.return_value.get_geometry.return_value = geo
+            stub.position_popup()
+        return stub.popup.move.call_args.args
+
+    def test_the_popup_is_placed_by_its_own_width_so_its_right_edge_is_flush(self):
+        self.assertEqual(self.place(471)[0], 1920 - 471)
+        self.assertEqual(self.place(612)[0], 1920 - 612)
+
+    def test_a_second_monitor_offset_is_kept(self):
+        self.assertEqual(self.place(531, screen_width=1366, screen_x=1920)[0], 1920 + 1366 - 531)
+
+    def test_a_popup_wider_than_the_screen_starts_at_its_left_edge(self):
+        self.assertEqual(self.place(2500, screen_width=1366)[0], 0)
+
+
+class TestPopupWidthIsFittedBeforePlacing(unittest.TestCase):
+    def test_the_width_is_settled_before_the_popup_is_positioned(self):
+        stub = TestPopupRebuildRules.Stub(visible=False)
+        order = mock.Mock()
+        stub._fit_popup_width = order.fit
+        stub.position_popup = order.place
+        with mock.patch.object(rt, 'is_fullscreen_active', return_value=False), mock.patch.object(rt.threading, 'Thread'):
+            stub.show_popup()
+        self.assertEqual([c[0] for c in order.mock_calls], ['fit', 'place'])
 
 
 if __name__ == '__main__':

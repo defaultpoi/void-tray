@@ -97,6 +97,7 @@ class WeatherMixin:
         if alerts is not None:
             self.active_alerts = alerts
         self.rebuild_weather_bar()
+        self._refit_open_popup()  # new values can need a wider or narrower popup
         self.update_icon()
         return False
 

@@ -18,7 +18,7 @@ from .ui.connectivity import ConnectivityMixin
 from .ui.feeds import FeedsMixin
 from .ui.icon import IconMixin
 from .ui.live import LiveMixin
-from .ui.popup import PopupMixin
+from .ui.popup import PopupMixin, WINDOW_WIDTH
 from .ui.timer import TimerMixin
 from .ui.updates import UpdatesMixin
 from .ui.weather import WeatherMixin
@@ -34,6 +34,7 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self._twitch_lock = threading.Lock()  # guards overlapping Twitch-check cycles
         self._youtube_lock = threading.Lock()  # guards overlapping YouTube-check cycles
         self.popup = None
+        self.popup_width = WINDOW_WIDTH  # WINDOW_WIDTH, or wider when the weather bar needs it (see _fit_popup_width)
         self.listbox = None
         self.scroller = None
         self._launcher_open = False

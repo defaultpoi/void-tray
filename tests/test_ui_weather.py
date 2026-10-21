@@ -125,5 +125,25 @@ class TestWeatherArrowStaysInPlace(unittest.TestCase):
             buttons[0].connect.assert_called_once_with('clicked', stub.on_weather_arrow_clicked, target)
 
 
+
+class TestWeatherFetchedRefitsThePopup(unittest.TestCase):
+    class Stub:
+        _on_weather_fetched = rt.RssTray._on_weather_fetched
+
+        def __init__(self):
+            self.calls = []
+            self.weather_data = None
+            self.active_alerts = []
+            self.rebuild_weather_bar = lambda: self.calls.append('bar')
+            self._refit_open_popup = lambda: self.calls.append('refit')
+            self.update_icon = lambda: self.calls.append('icon')
+
+    def test_new_values_refit_an_open_popup_after_the_bar_is_rebuilt(self):
+        stub = self.Stub()
+        self.assertFalse(stub._on_weather_fetched({'temp': 1}))
+        self.assertEqual(stub.weather_data, {'temp': 1})
+        self.assertEqual(stub.calls, ['bar', 'refit', 'icon'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -416,17 +416,48 @@ class PopupMixin:
         self.build_popup_window()
         self._update_scroller_max_height()
         self.refresh_list()
+        self._fit_popup_width()
         self.position_popup()
         self.popup.show_all()
         self.popup.present()
         self.popup.grab_focus()
+
+    def _fit_popup_width(self):
+        """Sizes the popup to WINDOW_WIDTH, or wider when the weather bar needs it:
+        the 5-day forecast with two-digit temperatures is wider than the default,
+        and a window wider than its default grows past the screen's right edge,
+        cutting the last value, the arrow and the footer's last button. Both views
+        are measured on the real widgets, so the width does not depend on which is
+        showing and switching views never resizes the window (the arrow stays put).
+        position_popup places the window by this width. True when it changed."""
+        showing = self.weather_view
+        needed = WINDOW_WIDTH
+        for view in ('today', 'forecast'):
+            self.weather_view = view
+            self.rebuild_weather_bar()
+            needed = max(needed, self.weather_box.get_preferred_width()[0])
+        self.weather_view = showing
+        self.rebuild_weather_bar()
+        changed = needed != self.popup_width
+        self.popup_width = needed
+        self.popup.set_default_size(needed, -1)
+        return changed
+
+    def _refit_open_popup(self):
+        """New weather values can need a different width: resize an open popup
+        and put its right edge back against the screen's."""
+        if self.popup is None or not self.popup.get_visible():
+            return
+        if self._fit_popup_width():
+            self.popup.resize(self.popup_width, self.popup.get_size()[1])
+            self.position_popup()
 
     def position_popup(self):
         display = Gdk.Display.get_default()
         monitor = display.get_primary_monitor() or display.get_monitor(0)
         geo = monitor.get_geometry()
 
-        x = geo.x + geo.width - WINDOW_WIDTH  # flush against the right edge
+        x = geo.x + geo.width - min(self.popup_width, geo.width)  # flush against the right edge
 
         y = geo.y + 2  # flush against the top, as a fallback
         try:
