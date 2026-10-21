@@ -599,6 +599,38 @@ class TestUpdateSummaryRows(unittest.TestCase):
         _, markups = self.rows(self.summary() | {'updated': ['libfoo', 'bar-devel', 'baz']})
         self.assertIn('Updated: libfoo, bar-devel, baz', markups)
 
+    def test_each_change_is_its_own_row_with_the_old_and_new_version(self):
+        _, markups = self.rows(self.summary() | {'updated': ['pkg1', 'pkg2'],
+                                                 'changes': [('pkg1', '3.2', '3.3'), ('pkg2', '2.0', '2.1')]})
+        self.assertIn('pkg1 3.2 -> 3.3', markups)
+        self.assertIn('pkg2 2.0 -> 2.1', markups)
+        self.assertFalse([m for m in markups if m.startswith('Updated')])  # replaces the comma list
+
+    def test_a_change_without_an_old_version_still_shows_the_new_one(self):
+        _, markups = self.rows(self.summary() | {'changes': [('pkg1', None, '3.3')]})
+        self.assertIn('pkg1 -> 3.3', markups)
+
+    def test_a_tool_change_is_listed_even_with_no_packages_updated(self):
+        _, markups = self.rows(self.summary() | {'updated': [], 'changes': [('Claude Code', '2.1.304', '2.1.305')]})
+        self.assertIn('Claude Code 2.1.304 -> 2.1.305', markups)
+
+    def test_a_very_long_list_of_changes_is_cut_with_a_count_of_the_rest(self):
+        changes = [(f'pkg{i}', '1', '2') for i in range(rt.SUMMARY_MAX_NAMES + 5)]
+        _, markups = self.rows(self.summary() | {'changes': changes})
+        self.assertIn(f'pkg{rt.SUMMARY_MAX_NAMES - 1} 1 -> 2', markups)
+        self.assertNotIn(f'pkg{rt.SUMMARY_MAX_NAMES} 1 -> 2', markups)
+        self.assertIn('… and 5 more', markups)
+
+    def test_the_change_rows_wrap_and_are_escaped(self):
+        stub = self.Stub({})
+        stub.update_summary = self.summary() | {'changes': [('a<b', '1', '2')]}
+        with mock.patch.object(rt.Gtk, 'ListBoxRow'), mock.patch.object(rt.Gtk, 'Label') as label, \
+                mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x.replace('<', '&lt;')):
+            stub.build_header_row = mock.Mock(return_value=mock.MagicMock())
+            stub.add_update_summary_rows()
+        label.return_value.set_line_wrap.assert_called_with(True)
+        self.assertIn('a&lt;b 1 -> 2', [c.args[0] for c in label.return_value.set_markup.call_args_list])
+
     def test_packages_that_did_not_update_are_called_out_in_red(self):
         _, markups = self.rows(self.summary() | {'updated': ['a'], 'not_updated': ['held']})
         line = [m for m in markups if 'Not updated' in m][0]

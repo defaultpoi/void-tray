@@ -16,6 +16,7 @@ from ..constants import CONFIG_FILE, OFFLINE_BANNER_TEXT, TIMER_HEIGHT_COUNTDOWN
 from ..desktop import edit_file_externally, is_fullscreen_active, run_launcher_command
 from ..playback import open_twitch_stream, open_youtube_stream
 from ..rules import group_unread_by_feed, item_detail_text, item_is_highlighted
+from ..updates import format_change
 from .timer import TIMER_RESERVED_HEIGHT_PX, format_timer_countdown
 
 
@@ -591,7 +592,13 @@ class PopupMixin:
             escaped = GLib.markup_escape_text(line)
             self.listbox.add(self._orphan_info_row(
                 f'<b><span foreground="#b3261e">{escaped}</span></b>' if line.endswith(': FAILED') else escaped))
-        if updated:
+        changes = summary.get('changes')
+        if changes is not None:  # one row per package or tool: name, old version -> new version
+            for change in changes[:SUMMARY_MAX_NAMES]:
+                self.listbox.add(self._orphan_info_row(GLib.markup_escape_text(format_change(change)), wrap=True))
+            if len(changes) > SUMMARY_MAX_NAMES:
+                self.listbox.add(self._orphan_info_row(f"… and {len(changes) - SUMMARY_MAX_NAMES} more"))
+        elif updated:
             self.listbox.add(self._orphan_info_row(f"Updated: {self._name_list(updated)}", wrap=True))
         if not_updated:
             self.listbox.add(self._orphan_info_row(

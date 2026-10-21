@@ -182,6 +182,129 @@ class TestTopgradeEnv(unittest.TestCase):
             rt.topgrade_env()
             self.assertEqual(rt.os.environ['LC_ALL'], 'ro_RO.UTF-8')
 
+    def home_with(self, *dirs):
+        import tempfile
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        for name in dirs:
+            rt.os.makedirs(rt.os.path.join(home, name))
+        return home
+
+    def test_the_user_bin_directories_that_exist_are_added_to_the_end_of_path(self):
+        home = self.home_with('.local/bin', '.cargo/bin')
+        with mock.patch.dict(rt.os.environ, {'HOME': home, 'PATH': '/usr/bin:/bin'}):
+            env = rt.topgrade_env()
+        self.assertEqual(env['PATH'], f'/usr/bin:/bin:{home}/.local/bin:{home}/.cargo/bin')
+
+    def test_a_directory_already_on_the_path_is_not_added_again(self):
+        home = self.home_with('.local/bin', '.cargo/bin')
+        with mock.patch.dict(rt.os.environ, {'HOME': home, 'PATH': f'{home}/.local/bin:/usr/bin'}):
+            env = rt.topgrade_env()
+        self.assertEqual(env['PATH'], f'{home}/.local/bin:/usr/bin:{home}/.cargo/bin')
+
+    def test_a_directory_that_does_not_exist_is_left_out(self):
+        home = self.home_with('.local/bin')
+        with mock.patch.dict(rt.os.environ, {'HOME': home, 'PATH': '/usr/bin'}):
+            env = rt.topgrade_env()
+        self.assertEqual(env['PATH'], f'/usr/bin:{home}/.local/bin')
+
+    def test_a_missing_path_is_not_invented(self):
+        home = self.home_with('.local/bin')
+        with mock.patch.dict(rt.os.environ, {'HOME': home}):
+            rt.os.environ.pop('PATH', None)
+            self.assertNotIn('PATH', rt.topgrade_env())
+
+    def test_the_real_path_is_not_modified(self):
+        home = self.home_with('.local/bin')
+        with mock.patch.dict(rt.os.environ, {'HOME': home, 'PATH': '/usr/bin'}):
+            rt.topgrade_env()
+            self.assertEqual(rt.os.environ['PATH'], '/usr/bin')
+
+
+class TestVersionChange(unittest.TestCase):
+    def test_the_versions_come_from_the_pkgvers_without_the_build_revision(self):
+        self.assertEqual(rt.version_change('libfoo', 'libfoo-3.2_1', 'libfoo-3.3_1'), ('libfoo', '3.2', '3.3'))
+
+    def test_names_with_dashes_and_versions_with_letters_are_kept_whole(self):
+        self.assertEqual(rt.version_change('lib-foo-devel', 'lib-foo-devel-1.0.9a_2', 'lib-foo-devel-1.1_1'),
+                         ('lib-foo-devel', '1.0.9a', '1.1'))
+
+    def test_a_new_revision_of_the_same_version_keeps_the_revisions(self):
+        self.assertEqual(rt.version_change('libfoo', 'libfoo-3.2_1', 'libfoo-3.2_2'), ('libfoo', '3.2_1', '3.2_2'))
+
+    def test_a_bare_version_is_used_as_it_is(self):
+        self.assertEqual(rt.version_change('a', '1', '2'), ('a', '1', '2'))
+
+    def test_an_unknown_version_stays_unknown(self):
+        self.assertEqual(rt.version_change('a', None, 'a-2_1'), ('a', None, '2_1'))
+        self.assertEqual(rt.version_change('a', 'a-1_1', None), ('a', '1_1', None))
+
+
+class TestFormatChange(unittest.TestCase):
+    def test_name_old_arrow_new(self):
+        self.assertEqual(rt.format_change(('pkg1', '3.2', '3.3')), 'pkg1 3.2 -> 3.3')
+
+    def test_without_the_old_version_only_the_new_one_follows_the_arrow(self):
+        self.assertEqual(rt.format_change(('pkg1', None, '3.3')), 'pkg1 -> 3.3')
+
+    def test_without_the_new_version_it_is_just_the_name(self):
+        self.assertEqual(rt.format_change(('pkg1', '3.2', None)), 'pkg1')
+        self.assertEqual(rt.format_change(('pkg1', None, None)), 'pkg1')
+
+
+class TestToolChangeReaders(unittest.TestCase):
+    def test_claude_code_names_both_versions_when_it_updated(self):
+        lines = ['Current version: 2.1.304', 'Checking for updates to latest version...',
+                 'Updating to 2.1.305...', 'Successfully updated from 2.1.304 to version 2.1.305']
+        self.assertEqual(rt.read_claude_code_changes(lines), [('Claude Code', '2.1.304', '2.1.305')])
+
+    def test_claude_code_that_was_current_has_no_change(self):
+        self.assertEqual(rt.read_claude_code_changes(['Current version: 2.1.305', 'Claude Code is up to date']), [])
+        self.assertEqual(rt.read_claude_code_changes([]), [])
+
+    def test_rustup_lists_each_toolchain_that_moved(self):
+        lines = ['stable-x86_64-unknown-linux-gnu updated - rustc 1.75.0 (82e1608df 2023-12-21) (from rustc 1.74.1 (a28077b28 2023-12-04))',
+                 'nightly-x86_64-unknown-linux-gnu updated - rustc 1.77.0-nightly (11f32b73e 2024-01-31) (from rustc 1.76.0-nightly (3f28fe133 2023-12-18))',
+                 'info: cleaning up downloads & tmp directories']
+        self.assertEqual(rt.read_rustup_changes(lines), [
+            ('stable-x86_64-unknown-linux-gnu', '1.74.1', '1.75.0'),
+            ('nightly-x86_64-unknown-linux-gnu', '1.76.0-nightly', '1.77.0-nightly')])
+
+    def test_rustup_toolchains_that_did_not_change_are_skipped(self):
+        lines = ['  stable-x86_64-unknown-linux-gnu unchanged - rustc 1.75.0 (82e1608df 2023-12-21)',
+                 'info: checking for self-update']
+        self.assertEqual(rt.read_rustup_changes(lines), [])
+
+
+class TestTopgradeOutputChanges(unittest.TestCase):
+    def read(self, lines):
+        output = rt.TopgradeOutput()
+        for line in lines:
+            output.feed(line)
+        return output.changes()
+
+    def test_each_step_is_read_under_its_own_heading(self):
+        changes = self.read([
+            heading('System update'), 'Successfully updated from 1.0 to version 2.0',  # not the Claude Code step
+            heading('rustup'), 'stable-x86_64-unknown-linux-gnu updated - rustc 1.75.0 (a 1) (from rustc 1.74.1 (b 2))',
+            heading('Claude Code'), 'Successfully updated from 2.1.304 to version 2.1.305',
+            heading('Summary'), 'Claude Code: OK'])
+        self.assertEqual(changes, [('Claude Code', '2.1.304', '2.1.305'),
+                                   ('stable-x86_64-unknown-linux-gnu', '1.74.1', '1.75.0')])
+
+    def test_the_summary_is_not_read_as_a_steps_output(self):
+        self.assertEqual(self.read([heading('Claude Code'), 'x', heading('Summary'),
+                                    'Successfully updated from 1 to version 2']), [])
+
+    def test_nothing_read_means_no_changes(self):
+        self.assertEqual(self.read([]), [])
+        self.assertEqual(self.read([heading('Flatpak'), 'Nothing to update.']), [])
+
+    def test_a_flood_of_output_in_a_read_step_is_cut_but_does_not_lose_the_start(self):
+        lines = [heading('Claude Code'), 'Successfully updated from 1 to version 2'] + ['noise'] * 5000
+        self.assertEqual(self.read(lines), [('Claude Code', '1', '2')])
+
 
 if __name__ == '__main__':
     unittest.main()

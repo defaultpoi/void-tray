@@ -19,6 +19,7 @@ from ..updates import (
     list_orphans,
     topgrade_command,
     topgrade_env,
+    version_change,
 )
 
 
@@ -323,16 +324,19 @@ class UpdatesMixin:
                 shown='Updating…', on_line=output.feed, env=topgrade_env())
             if returncode != 0:
                 _log(f'topgrade exited with {returncode}: ' + ' | '.join(tail))
-            updated, not_updated = [], []
+            updated, not_updated, changes = [], [], []
             for pkgname in pkgnames:
-                if get_installed_version(pkgname) != before[pkgname]:
+                now = get_installed_version(pkgname)
+                if now != before[pkgname]:
                     updated.append(pkgname)
+                    changes.append(version_change(pkgname, before[pkgname], now))
                     self._set_status(pkgname, 'Done')
                     GLib.timeout_add(1200, self._finalize_package_removal, pkgname)
                 else:
                     not_updated.append(pkgname)
                     self._set_status(pkgname, 'Failed')
             summary = output.summary(returncode, tail)
-            summary.update(when=time_module.strftime('%H:%M'), updated=updated, not_updated=not_updated)
+            summary.update(when=time_module.strftime('%H:%M'), updated=updated, not_updated=not_updated,
+                           changes=changes + output.changes())
             GLib.idle_add(self._show_update_summary, summary)
         GLib.idle_add(self._end_install)

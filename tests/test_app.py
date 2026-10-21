@@ -143,6 +143,25 @@ class TestRunTopgrade(unittest.TestCase):
         self.assertEqual(stub.summaries[0]['updated'], [])
         self.assertEqual(stub.summaries[0]['not_updated'], ['a'])
 
+    def test_the_summary_lists_each_updated_package_with_its_old_and_new_version(self):
+        stub, _, _ = self._run(['libfoo', 'libbar', 'held'],
+                               ['libfoo-3.2_1', 'libbar-2.0_1', 'held-1.0_1', 'libfoo-3.3_1', 'libbar-2.1_1', 'held-1.0_1'])
+        self.assertEqual(stub.summaries[0]['changes'], [('libfoo', '3.2', '3.3'), ('libbar', '2.0', '2.1')])
+        self.assertEqual(stub.summaries[0]['updated'], ['libfoo', 'libbar'])  # the count in the header is unchanged
+
+    def test_tools_that_say_what_they_went_from_and_to_follow_the_packages(self):
+        lines = [self.head('Claude Code'), 'Successfully updated from 2.1.304 to version 2.1.305\n',
+                 self.head('Summary'), 'Claude Code: OK\n']
+        stub, _, _ = self._run(['libfoo'], ['libfoo-3.2_1', 'libfoo-3.3_1'], lines=lines)
+        self.assertEqual(stub.summaries[0]['changes'],
+                         [('libfoo', '3.2', '3.3'), ('Claude Code', '2.1.304', '2.1.305')])
+
+    def test_a_tool_update_is_listed_even_when_no_package_changed(self):
+        lines = [self.head('Claude Code'), 'Successfully updated from 2.1.304 to version 2.1.305\n']
+        stub, _, _ = self._run(['held'], ['held-1.0_1', 'held-1.0_1'], lines=lines)
+        self.assertEqual(stub.summaries[0]['changes'], [('Claude Code', '2.1.304', '2.1.305')])
+        self.assertEqual(stub.summaries[0]['updated'], [])
+
     def test_a_topgrade_that_could_not_start_still_reports_something(self):
         stub, _, _ = self._run(['a'], ['1', '1'], popen_error=FileNotFoundError('topgrade'))
         self.assertEqual(len(stub.summaries), 1)
