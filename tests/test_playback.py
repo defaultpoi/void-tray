@@ -72,7 +72,7 @@ class TestOpenLiveStream(unittest.TestCase):
         thread.assert_called_once()
         self.assertIs(thread.call_args.kwargs['target'], rt._play_in_shared_mpv)
         self.assertEqual(thread.call_args.kwargs['args'], (
-            'twitch.tv/somechan', '720p60', 'Twitch', 'somechan', 'https://twitch.tv/somechan', None))
+            'twitch.tv/somechan', '720p60', 'Twitch', 'somechan', 'https://twitch.tv/somechan', None, None))
         thread.return_value.start.assert_called_once()
         wb_open.assert_not_called()
 
@@ -102,14 +102,68 @@ class TestOpenLiveStream(unittest.TestCase):
             rt.open_youtube_stream('@somehandle', '720p60')
         self.assertEqual(thread.call_args.kwargs['args'], (
             'https://www.youtube.com/@somehandle/live', '720p60', 'YouTube',
-            '@somehandle', 'https://www.youtube.com/@somehandle', None))
+            '@somehandle', 'https://www.youtube.com/@somehandle', None, None))
         wb_open.assert_not_called()
+
+    def test_a_display_name_travels_with_the_title_to_the_worker(self):
+        with self._which_ok(), mock.patch.object(rt.threading, 'Thread') as thread:
+            rt.open_twitch_stream('somechan', '720p60', title='Stream title', name='Some Name')
+            twitch_args = thread.call_args.kwargs['args']
+            rt.open_youtube_stream('@somehandle', '720p60', title='Stream title', name='Other Name')
+            youtube_args = thread.call_args.kwargs['args']
+        self.assertEqual(twitch_args[-2:], ('Stream title', 'Some Name'))
+        self.assertEqual(youtube_args[-2:], ('Stream title', 'Other Name'))
 
     def test_youtube_falls_back_to_channel_page_when_mpv_missing(self):
         with mock.patch.object(rt.shutil, 'which', side_effect=lambda x: None if x == 'mpv' else '/x'), \
                 mock.patch.object(rt.webbrowser, 'open') as wb_open:
             rt.open_youtube_stream('@somehandle')
         wb_open.assert_called_once_with('https://www.youtube.com/@somehandle')
+
+
+class TestDisplayNameInTheWindowTitle(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(setattr, rt, '_playing', rt._playing)
+        self.addCleanup(setattr, rt, '_streamlink_proc', rt._streamlink_proc)
+
+    def play(self, name):
+        rt._streamlink_proc = None
+        proc = FakeStreamlinkProc(['access with one of:\n'])
+        titles = []
+        with mock.patch.object(rt.subprocess, 'Popen', return_value=proc), \
+                mock.patch.object(rt, '_load_in_mpv', side_effect=lambda u, t: titles.append(t) or True), \
+                mock.patch.object(rt.threading, 'Thread') as thread, mock.patch.object(rt.threading, 'Timer'):
+            rt._play_in_shared_mpv('twitch.tv/x', 'best', 'Twitch', 'x', 'https://twitch.tv/x', 'Stream title', name)
+        return titles, thread
+
+    def test_the_window_is_titled_with_the_display_name_instead_of_the_channel(self):
+        titles, _ = self.play('Some Name')
+        self.assertEqual(titles, ['Twitch \u00b7 Some Name \u00b7 Stream title'])
+
+    def test_without_a_display_name_the_channel_is_used_as_before(self):
+        titles, _ = self.play(None)
+        self.assertEqual(titles, ['Twitch \u00b7 x \u00b7 Stream title'])
+
+    def test_the_name_is_handed_on_to_the_title_refresh(self):
+        _, thread = self.play('Some Name')
+        refresh = [c for c in thread.call_args_list if c.kwargs.get('target') is rt._apply_stream_title][0]
+        self.assertEqual(refresh.kwargs['args'][-1], 'Some Name')
+
+    def refined(self, name, author):
+        proc = FakeStreamlinkProc([])
+        result = mock.Mock(stdout='{"metadata": {"author": %s, "title": "Live now"}}' % ('"%s"' % author if author else 'null'))
+        with mock.patch.object(rt.subprocess, 'run', return_value=result), \
+                mock.patch.object(rt, '_is_current_streamlink', return_value=True), \
+                mock.patch.object(rt, '_mpv_ipc') as ipc:
+            rt._apply_stream_title(proc, 'twitch.tv/x', 'Twitch', 'x', name)
+        return ipc.call_args.args[0][0][2]
+
+    def test_the_refined_title_keeps_the_configured_name_over_the_platforms_author(self):
+        self.assertEqual(self.refined('Some Name', 'SomeAuthor'), 'Twitch \u00b7 Some Name \u00b7 Live now')
+
+    def test_without_a_name_the_platforms_author_is_used_as_before(self):
+        self.assertEqual(self.refined(None, 'SomeAuthor'), 'Twitch \u00b7 SomeAuthor \u00b7 Live now')
+        self.assertEqual(self.refined(None, None), 'Twitch \u00b7 x \u00b7 Live now')
 
 
 class TestSharedMpv(unittest.TestCase):

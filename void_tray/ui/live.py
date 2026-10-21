@@ -9,11 +9,13 @@ from ..config import (
     load_twitch_channels,
     load_twitch_check_interval,
     load_twitch_default_quality,
+    load_twitch_names,
     load_twitch_qualities,
     load_twitch_schedules,
     load_youtube_channels,
     load_youtube_check_interval,
     load_youtube_default_quality,
+    load_youtube_names,
     load_youtube_qualities,
     load_youtube_schedules,
 )
@@ -136,11 +138,12 @@ class LiveMixin:
                 self.refresh_list()
         return False
 
-    def _build_live_row(self, entry, site, color):
+    def _build_live_row(self, entry, site, color, name=None):
         """Shared by the Twitch and YouTube rows: '<user> - <category> -
         <viewers> - <elapsed>' (parts the platform doesn't give are left out)
         with the stream title as a tooltip; the leading bullet becomes a play
-        triangle while this channel is what mpv is playing."""
+        triangle while this channel is what mpv is playing. <user> is the
+        configured display name, or the channel name without one."""
         channel = entry['channel']
         title = entry.get('title') or ''
         category = entry.get('category') or ''
@@ -149,6 +152,7 @@ class LiveMixin:
         row.set_selectable(False)
         row.set_activatable(True)
         row.live_title = title
+        row.live_name = name  # the player window is titled with it too
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.set_margin_start(3)
@@ -160,7 +164,7 @@ class LiveMixin:
         marker.set_markup(live_marker_markup(color, is_stream_playing(site, channel)))
         box.pack_start(marker, False, False, 0)
 
-        markup = f'<b>{GLib.markup_escape_text(channel)}</b>'
+        markup = f'<b>{GLib.markup_escape_text(name or channel)}</b>'
         if category:
             markup += f' - {GLib.markup_escape_text(category)}'
         label = Gtk.Label()
@@ -186,13 +190,13 @@ class LiveMixin:
         return row
 
     def build_twitch_row(self, entry):
-        row = self._build_live_row(entry, 'Twitch', '#9146FF')
+        row = self._build_live_row(entry, 'Twitch', '#9146FF', load_twitch_names().get(entry['channel']))
         row.twitch_channel = entry['channel']
         row.twitch_quality = load_twitch_qualities().get(entry['channel']) or load_twitch_default_quality()
         return row
 
     def build_youtube_row(self, entry):
-        row = self._build_live_row(entry, 'YouTube', '#FF0000')
+        row = self._build_live_row(entry, 'YouTube', '#FF0000', load_youtube_names().get(entry['channel']))
         row.youtube_channel = entry['channel']
         row.youtube_quality = load_youtube_qualities().get(entry['channel']) or load_youtube_default_quality()
         return row

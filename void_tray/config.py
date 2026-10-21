@@ -72,7 +72,7 @@ def ensure_config():
             "\n"
             "[twitch]\n"
             "# Twitch channel login names to watch for live status, one per line:\n"
-            "#   channel|quality (optional)|schedule (optional)\n"
+            "#   channel|display name (optional)|quality (optional)|schedule (optional)\n"
             "# Uses Twitch's own internal (unofficial) API — no account/app needed.\n"
             "# Clicking a live channel plays it (streamlink + mpv, one shared maximized window).\n"
             "# interval=<minutes> sets how often to check (default 15, minimum 1).\n"
@@ -82,9 +82,12 @@ def ensure_config():
             "# (system local time): [days] HH:MM[-HH:MM], several separated by ;\n"
             "# Days: mon..sun, ranges (tue-sun), lists (mon,wed), daily, weekdays,\n"
             "# weekends; no end time means until midnight. Examples:\n"
+            "# The display name is what the popup row and the player window call the\n"
+            "# channel (default: the channel name). Leave a field empty to skip it:\n"
             "# examplechannel\n"
-            "# weeklychannel||wed 18:00-23:00\n"
-            "# dailychannel|720p60|tue-sun 13:00-; sat 10:00-12:00\n"
+            "# namedchannel|Some Name\n"
+            "# weeklychannel|||wed 18:00-23:00\n"
+            "# dailychannel|Daily Show|720p60|tue-sun 13:00-; sat 10:00-12:00\n"
             "\n"
             "[youtube]\n"
             "# Same format as [twitch]; identifiers are @handle or channel/UC... and\n"
@@ -219,22 +222,24 @@ def load_mute_filters():
 
 def _load_live_entries(section, fold_case):
     """Parses the channel lines of [twitch] / [youtube]:
-    'channel|quality|schedule', the last two optional. Returns
-    [(channel, quality_or_None, schedule_text_or_None)], de-duplicated
-    case-insensitively (first line wins) in config order. Twitch logins are
-    lowercased (fold_case); YouTube identifiers keep the casing as typed."""
+    'channel|display name|quality|schedule', the last three optional (each may
+    be left empty). Returns [(channel, name_or_None, quality_or_None,
+    schedule_text_or_None)], de-duplicated case-insensitively (first line wins)
+    in config order. Twitch logins are lowercased (fold_case); YouTube
+    identifiers keep the casing as typed."""
     entries, seen = [], set()
     for line in _read_config_sections()[section]:
         if '=' in line:
             continue  # a setting (e.g. interval=10), not a channel
-        parts = [p.strip() for p in line.split('|', 2)]
+        parts = [p.strip() for p in line.split('|', 3)]
         channel = parts[0].lower() if fold_case else parts[0]
         if not channel or channel.lower() in seen:
             continue
         seen.add(channel.lower())
-        quality = parts[1] if len(parts) > 1 and parts[1] else None
-        schedule = parts[2] if len(parts) > 2 and parts[2] else None
-        entries.append((channel, quality, schedule))
+        name = parts[1] if len(parts) > 1 and parts[1] else None
+        quality = parts[2] if len(parts) > 2 and parts[2] else None
+        schedule = parts[3] if len(parts) > 3 and parts[3] else None
+        entries.append((channel, name, quality, schedule))
     return entries
 
 
@@ -243,7 +248,7 @@ def _entry_schedules(entries):
     invalid one is reported (RSS_TRAY_DEBUG) and ignored, i.e. that channel is
     then checked all the time rather than never."""
     schedules = {}
-    for channel, _quality, text in entries:
+    for channel, _name, _quality, text in entries:
         if not text:
             continue
         try:
@@ -283,7 +288,12 @@ def load_youtube_default_quality():
 def load_twitch_qualities():
     """{channel: quality} for lines with a quality; callers default the rest
     to 'best'."""
-    return {c: q for c, q, _s in _load_live_entries('twitch', True) if q}
+    return {c: q for c, _n, q, _s in _load_live_entries('twitch', True) if q}
+
+
+def load_twitch_names():
+    """{channel: display name} for lines with one; the rest show the channel name."""
+    return {c: n for c, n, _q, _s in _load_live_entries('twitch', True) if n}
 
 
 def load_twitch_schedules():
@@ -297,7 +307,11 @@ def load_youtube_channels():
 
 
 def load_youtube_qualities():
-    return {c: q for c, q, _s in _load_live_entries('youtube', False) if q}
+    return {c: q for c, _n, q, _s in _load_live_entries('youtube', False) if q}
+
+
+def load_youtube_names():
+    return {c: n for c, n, _q, _s in _load_live_entries('youtube', False) if n}
 
 
 def load_youtube_schedules():

@@ -19,9 +19,9 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
 ### Live streams
 
-- **Twitch:** live channels are polled (every 15 minutes by default, `interval=` in `[twitch]`; optionally only during per-channel schedules, see below) through Twitch's unofficial GQL API (no app registration), in batches of 20 channels. Rows read `<user> - <category> - <viewers> - <elapsed>` (e.g. `channel - Chess - 283 - 3h 21min`; the stream title is the tooltip), and the bullet turns into a play triangle on the channel that's playing. Click a row to play it with `streamlink` and `mpv` at the configured quality (default `best`); the popup closes, and a second click on another channel reuses the same maximized mpv window. If either binary isn't installed, or launching fails, it opens the channel in your browser instead.
+- **Twitch:** live channels are polled (every 15 minutes by default, `interval=` in `[twitch]`; optionally only during per-channel schedules, see below) through Twitch's unofficial GQL API (no app registration), in batches of 20 channels. Rows read `<name> - <category> - <viewers> - <elapsed>`, where `<name>` is the channel's display name from the config (the channel name when it has none) (e.g. `channel - Chess - 283 - 3h 21min`; the stream title is the tooltip), and the bullet turns into a play triangle on the channel that's playing. Click a row to play it with `streamlink` and `mpv` at the configured quality (default `best`); the popup closes, and a second click on another channel reuses the same maximized mpv window. If either binary isn't installed, or launching fails, it opens the channel in your browser instead.
 - **YouTube Live:** live channels are polled (every 15 minutes by default, `interval=` in `[youtube]`; same per-channel schedules) via `streamlink --json <channel>/live` per channel -- no API key, and the same extraction path used for actual playback, so the check can't disagree with what clicking the row does. There's no keyless batch API for YouTube, so this is one streamlink call per channel (heavier than Twitch's single batched request). Shares the same "Live now" list, quality config, and browser fallback as Twitch. Viewers and elapsed time come from one extra request to the live page for each channel that is live (best effort: if YouTube doesn't give them, the row simply omits them).
-- **Player window titles:** mpv's title is `<Site> · <user> · <stream title>` for both platforms.
+- **Player window titles:** mpv's title is `<Site> · <name> · <stream title>` for both platforms, with the configured display name when the channel has one and otherwise the name the platform gives.
 
 ### Weather
 
@@ -110,8 +110,12 @@ https://example.com/feed.xml|My Blog|15||category=long reads
 sponsored
 
 [twitch]
-# one channel name per line: channel|quality|schedule  (quality and schedule
-# optional; quality is a streamlink format such as 720p60, default "best")
+# one channel name per line: channel|display name|quality|schedule  (all but the
+# channel are optional and a field may be left empty; the display name is what the
+# popup row and the player window call the channel, default the channel name;
+# quality is a streamlink format such as 720p60, default "best"). Lines written
+# before the display name existed (channel|quality|schedule) need an extra | after
+# the channel.
 # interval=<minutes> sets how often to check for live channels (default 15,
 # minimum 1).
 interval=15
@@ -120,20 +124,20 @@ interval=15
 # if the stream has it, else 720p, else the best there is. Default: best.
 quality=720p60,720p,best
 somechannel
-somechannel2|720p60
-weeklychannel||wed 18:00-23:00
-dailychannel|720p60|tue-sun 13:00-; sat 10:00-12:00
+somechannel2|Some Name
+weeklychannel|||wed 18:00-23:00
+dailychannel|Daily Show|720p60|tue-sun 13:00-; sat 10:00-12:00
 
 [youtube]
 # one channel identifier per line -- whatever goes after youtube.com/, so
 # either @handle or channel/UCxxxxxxxxxxxxxxxxxxxxxx (case-sensitive,
-# unlike Twitch names). Optionally |quality|schedule, same as [twitch].
+# unlike Twitch names). Optionally |display name|quality|schedule, same as [twitch].
 # interval=<minutes> between live checks (default 15, minimum 5 -- each
 # channel costs a full streamlink run).
 interval=15
 quality=720p,480p,best
-@somehandle
-channel/UCxxxxxxxxxxxxxxxxxxxxxx|720p60
+@somehandle|Some Name
+channel/UCxxxxxxxxxxxxxxxxxxxxxx|Other Name|720p60
 
 [weather]
 # lat|lon for the weather bar (Open-Meteo, no key needed); the weather

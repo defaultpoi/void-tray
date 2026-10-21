@@ -164,18 +164,18 @@ class TestDefaultStreamQuality(TmpConfigCase):
         self.assertEqual(rt.load_twitch_default_quality(), 'best')
 
     def test_the_setting_line_is_not_a_channel_and_does_not_leak_into_qualities(self):
-        self.conf('[twitch]\nquality=720p\nchan\nother|1080p60\n')
+        self.conf('[twitch]\nquality=720p\nchan\nother||1080p60\n')
         self.assertEqual(rt.load_twitch_channels(), ['chan', 'other'])
         self.assertEqual(rt.load_twitch_qualities(), {'other': '1080p60'})
 
     def test_rows_use_their_own_quality_else_the_section_default(self):
-        self.conf('[twitch]\nquality=720p,best\nplain\nown|480p\n[youtube]\nquality=360p,best\n@a\n@b|1080p\n')
+        self.conf('[twitch]\nquality=720p,best\nplain\nown||480p\n[youtube]\nquality=360p,best\n@a\n@b||1080p\n')
 
         class Stub:
             build_twitch_row = rt.RssTray.build_twitch_row
             build_youtube_row = rt.RssTray.build_youtube_row
 
-            def _build_live_row(self, entry, site, color):
+            def _build_live_row(self, entry, site, color, name=None):
                 return mock.Mock()
         stub = Stub()
         self.assertEqual(stub.build_twitch_row({'channel': 'plain'}).twitch_quality, '720p,best')
@@ -306,7 +306,7 @@ class TestLiveCheckIntervals(TmpConfigCase):
         self.assertEqual(rt.load_youtube_check_interval(), rt.YOUTUBE_CHECK_INTERVAL_SECONDS)
 
     def test_interval_lines_are_not_channels(self):
-        self.conf('[twitch]\ninterval=10\nchan|720p60\n[youtube]\ninterval=20\n@h|480p\n')
+        self.conf('[twitch]\ninterval=10\nchan||720p60\n[youtube]\ninterval=20\n@h||480p\n')
         self.assertEqual(rt.load_twitch_channels(), ['chan'])
         self.assertEqual(rt.load_twitch_qualities(), {'chan': '720p60'})
         self.assertEqual(rt.load_youtube_channels(), ['@h'])
@@ -314,9 +314,9 @@ class TestLiveCheckIntervals(TmpConfigCase):
 
 
 class TestScheduleConfig(TmpConfigCase):
-    def test_schedule_is_the_third_field_and_quality_may_be_empty(self):
-        self.conf('[twitch]\nplain\nweekly||wed 18:00-23:00\nboth|720p60|tue-sun 13:00-; sat 10:00-12:00\n'
-                  '[youtube]\n@Handle|480p|mon 20:00-\n')
+    def test_schedule_is_the_fourth_field_and_name_and_quality_may_be_empty(self):
+        self.conf('[twitch]\nplain\nweekly|||wed 18:00-23:00\nboth||720p60|tue-sun 13:00-; sat 10:00-12:00\n'
+                  '[youtube]\n@Handle||480p|mon 20:00-\n')
         self.assertEqual(rt.load_twitch_channels(), ['plain', 'weekly', 'both'])
         self.assertEqual(rt.load_twitch_qualities(), {'both': '720p60'})
         schedules = rt.load_twitch_schedules()
@@ -327,16 +327,77 @@ class TestScheduleConfig(TmpConfigCase):
         self.assertEqual(set(rt.load_youtube_schedules()), {'@Handle'})
 
     def test_invalid_schedule_means_always_checked(self):
-        self.conf('[twitch]\nbroken||someday 99:99\nfine||wed 18:00\n')
+        self.conf('[twitch]\nbroken|||someday 99:99\nfine|||wed 18:00\n')
         self.assertEqual(set(rt.load_twitch_schedules()), {'fine'})
         self.assertEqual(rt.channels_due(rt.load_twitch_channels(), rt.load_twitch_schedules(), set(), dt(0, 3)),
                          ['broken'])
 
     def test_first_line_wins_for_duplicates(self):
-        self.conf('[twitch]\nChan|720p60\nchan|480p||wed 18:00\n')
+        self.conf('[twitch]\nChan||720p60\nchan||480p|wed 18:00\n')
         self.assertEqual(rt.load_twitch_channels(), ['chan'])
         self.assertEqual(rt.load_twitch_qualities(), {'chan': '720p60'})
         self.assertEqual(rt.load_twitch_schedules(), {})
+
+
+class TestLiveDisplayNames(TmpConfigCase):
+    def test_the_display_name_is_the_second_field(self):
+        self.conf('[twitch]\nplain\nnamed|Some Name\nfull|Daily Show|720p60|tue-sun 13:00-\n'
+                  '[youtube]\n@handle|Other Name|480p\nchannel/UCxxxx\n')
+        self.assertEqual(rt.load_twitch_channels(), ['plain', 'named', 'full'])
+        self.assertEqual(rt.load_twitch_names(), {'named': 'Some Name', 'full': 'Daily Show'})
+        self.assertEqual(rt.load_twitch_qualities(), {'full': '720p60'})
+        self.assertEqual(set(rt.load_twitch_schedules()), {'full'})
+        self.assertEqual(rt.load_youtube_channels(), ['@handle', 'channel/UCxxxx'])
+        self.assertEqual(rt.load_youtube_names(), {'@handle': 'Other Name'})
+        self.assertEqual(rt.load_youtube_qualities(), {'@handle': '480p'})
+
+    def test_an_empty_name_field_means_no_name_and_the_rest_still_counts(self):
+        self.conf('[twitch]\nweekly|||wed 18:00-23:00\nq||720p60\n')
+        self.assertEqual(rt.load_twitch_names(), {})
+        self.assertEqual(rt.load_twitch_qualities(), {'q': '720p60'})
+        self.assertEqual(set(rt.load_twitch_schedules()), {'weekly'})
+
+    def test_names_are_trimmed_may_hold_spaces_and_keep_their_case(self):
+        self.conf('[twitch]\nChan |  Some  Name \n[youtube]\n@Handle| Mixed Case \n')
+        self.assertEqual(rt.load_twitch_names(), {'chan': 'Some  Name'})  # the login is folded, the name is not
+        self.assertEqual(rt.load_youtube_names(), {'@Handle': 'Mixed Case'})
+
+    def test_the_name_of_the_first_line_wins_for_duplicates(self):
+        self.conf('[twitch]\nchan|First\nChan|Second\n')
+        self.assertEqual(rt.load_twitch_names(), {'chan': 'First'})
+
+    def test_settings_are_not_names(self):
+        self.conf('[twitch]\ninterval=10\nquality=720p\nchan|Some Name\n')
+        self.assertEqual(rt.load_twitch_names(), {'chan': 'Some Name'})
+
+    def test_no_names_means_an_empty_mapping(self):
+        self.conf('[twitch]\nchan\n')
+        self.assertEqual(rt.load_twitch_names(), {})
+        self.assertEqual(rt.load_youtube_names(), {})
+
+    def test_rows_get_their_configured_name(self):
+        self.conf('[twitch]\nplain\nnamed|Some Name\n[youtube]\n@h|Other Name\n')
+        seen = []
+
+        class Stub:
+            build_twitch_row = rt.RssTray.build_twitch_row
+            build_youtube_row = rt.RssTray.build_youtube_row
+
+            def _build_live_row(self, entry, site, color, name=None):
+                seen.append((site, entry['channel'], name))
+                return mock.Mock()
+        stub = Stub()
+        stub.build_twitch_row({'channel': 'plain'})
+        stub.build_twitch_row({'channel': 'named'})
+        stub.build_youtube_row({'channel': '@h'})
+        self.assertEqual(seen, [('Twitch', 'plain', None), ('Twitch', 'named', 'Some Name'), ('YouTube', '@h', 'Other Name')])
+
+    def test_the_template_documents_the_four_fields(self):
+        text = open(rt.CONFIG_FILE).read() if rt.os.path.exists(rt.CONFIG_FILE) else ''
+        if not text:
+            rt.ensure_config()
+            text = open(rt.CONFIG_FILE).read()
+        self.assertIn('channel|display name (optional)|quality (optional)|schedule (optional)', text)
 
 
 class TestWeatherSettings(TmpConfigCase):
@@ -476,11 +537,11 @@ class TestFetchAlertsBg(TmpConfigCase):
 
 class TestTwitchQuality(TmpConfigCase):
     def test_channels_still_just_names(self):
-        self.conf('[twitch]\nfoo\nbar|720p60\n')
+        self.conf('[twitch]\nfoo\nbar||720p60\n')
         self.assertEqual(rt.load_twitch_channels(), ['foo', 'bar'])
 
     def test_qualities_parsed(self):
-        self.conf('[twitch]\nfoo\nbar|720p60\nbaz|1080p60\n')
+        self.conf('[twitch]\nfoo\nbar||720p60\nbaz||1080p60\n')
         self.assertEqual(rt.load_twitch_qualities(), {'bar': '720p60', 'baz': '1080p60'})
 
     def test_channel_without_quality_absent_from_qualities(self):
@@ -521,11 +582,11 @@ class TestTimerSettings(TmpConfigCase):
 
 class TestYoutubeChannelsAndQualities(TmpConfigCase):
     def test_channels_case_preserved_dedup_case_insensitive(self):
-        self.conf('[youtube]\n@SomeHandle\nchannel/UCxxxx|720p60\n@somehandle\n')
+        self.conf('[youtube]\n@SomeHandle\nchannel/UCxxxx||720p60\n@somehandle\n')
         self.assertEqual(rt.load_youtube_channels(), ['@SomeHandle', 'channel/UCxxxx'])
 
     def test_qualities_keyed_case_sensitive(self):
-        self.conf('[youtube]\n@SomeHandle|1080p60\nchannel/UCxxxx|720p60\n')
+        self.conf('[youtube]\n@SomeHandle||1080p60\nchannel/UCxxxx||720p60\n')
         self.assertEqual(rt.load_youtube_qualities(),
                           {'@SomeHandle': '1080p60', 'channel/UCxxxx': '720p60'})
 

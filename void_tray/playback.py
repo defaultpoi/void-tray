@@ -169,10 +169,11 @@ def _free_local_port():
         s.close()
 
 
-def _apply_stream_title(proc, url, site, channel):
+def _apply_stream_title(proc, url, site, channel, name=None):
     """Refines the window title with the author's display name and stream title
     from `streamlink --json` (external-http mode has no {author}/{title}
-    substitution of its own): '<site> \u00b7 <author> \u00b7 <title>'."""
+    substitution of its own): '<site> \u00b7 <author> \u00b7 <title>'. A display
+    name from the config is used instead of the author."""
     try:
         result = subprocess.run(['streamlink', '--json', url],
                                 capture_output=True, text=True,
@@ -180,7 +181,7 @@ def _apply_stream_title(proc, url, site, channel):
         meta = json.loads(result.stdout).get('metadata') or {}
     except Exception:
         return
-    title = stream_window_title(site, meta.get('author') or channel, meta.get('title'))
+    title = stream_window_title(site, name or meta.get('author') or channel, meta.get('title'))
     if meta and _is_current_streamlink(proc):
         _mpv_ipc([['set_property', 'force-media-title', title]])
 
@@ -203,7 +204,7 @@ def _stop_streamlink_when_mpv_exits(proc):
             return
 
 
-def _play_in_shared_mpv(url, quality, site, channel, fallback_url, title=None):
+def _play_in_shared_mpv(url, quality, site, channel, fallback_url, title=None, name=None):
     """Worker thread: serve the stream via streamlink, load it into the
     shared mpv. Falls back to the browser if anything fails (unless a newer
     click has superseded this one).
@@ -244,7 +245,7 @@ def _play_in_shared_mpv(url, quality, site, channel, fallback_url, title=None):
     finally:
         watchdog.cancel()
     loaded = ready and _load_in_mpv(f'http://127.0.0.1:{port}/',
-                                    stream_window_title(site, channel, title))
+                                    stream_window_title(site, name or channel, title))
     if not loaded:
         superseded = not _is_current_streamlink(proc)
         if not superseded:
@@ -269,18 +270,18 @@ def _play_in_shared_mpv(url, quality, site, channel, fallback_url, title=None):
             previous.terminate()  # mpv has already switched over to the new stream
         except OSError:
             pass
-    threading.Thread(target=_apply_stream_title, args=(proc, url, site, channel), daemon=True).start()
+    threading.Thread(target=_apply_stream_title, args=(proc, url, site, channel, name), daemon=True).start()
     threading.Thread(target=_stop_streamlink_when_mpv_exits, args=(proc,), daemon=True).start()
     for _line in proc.stdout:  # drain so streamlink never blocks on a full pipe
         pass
 
 
-def _open_live_stream(url, quality, site, channel, fallback_url, title=None):
+def _open_live_stream(url, quality, site, channel, fallback_url, title=None, name=None):
     if shutil.which('streamlink') and shutil.which('mpv'):
         try:
             threading.Thread(
                 target=_play_in_shared_mpv,
-                args=(url, quality, site, channel, fallback_url, title),
+                args=(url, quality, site, channel, fallback_url, title, name),
                 daemon=True).start()
             return
         except Exception:
@@ -288,16 +289,16 @@ def _open_live_stream(url, quality, site, channel, fallback_url, title=None):
     webbrowser.open(fallback_url)
 
 
-def open_twitch_stream(channel, quality='best', site='Twitch', title=None):
+def open_twitch_stream(channel, quality='best', site='Twitch', title=None, name=None):
     """Plays the stream in the shared, maximized mpv window (see above) if
     streamlink and mpv are installed; falls back to opening the channel in
     the browser otherwise, or if starting playback fails."""
     _open_live_stream(f'twitch.tv/{channel}', quality, site, channel,
-                      f'https://twitch.tv/{channel}', title)
+                      f'https://twitch.tv/{channel}', title, name)
 
 
-def open_youtube_stream(channel, quality='best', title=None):
+def open_youtube_stream(channel, quality='best', title=None, name=None):
     """Same as open_twitch_stream (shared mpv window); falls back to the
     channel's page in the browser."""
     _open_live_stream(f'https://www.youtube.com/{channel}/live', quality,
-                      'YouTube', channel, f'https://www.youtube.com/{channel}', title)
+                      'YouTube', channel, f'https://www.youtube.com/{channel}', title, name)

@@ -97,6 +97,20 @@ class TestOfflineBehavior(unittest.TestCase):
             stub.on_row_activated(None, mock.Mock(spec=['twitch_channel'], twitch_channel='chan'))
         twitch.assert_called_once()
 
+    def test_a_live_row_plays_with_its_title_and_display_name(self):
+        stub = self.Stub(online=True)
+        stub.popup = mock.MagicMock()
+        row = mock.Mock(spec=['twitch_channel', 'twitch_quality', 'live_title', 'live_name'],
+                        twitch_channel='chan', twitch_quality='720p', live_title='T', live_name='Some Name')
+        with mock.patch.object(rt, 'open_twitch_stream') as twitch:
+            stub.on_row_activated(None, row)
+        twitch.assert_called_once_with('chan', '720p', title='T', name='Some Name')
+        row = mock.Mock(spec=['youtube_channel', 'youtube_quality', 'live_title', 'live_name'],
+                        youtube_channel='@h', youtube_quality='480p', live_title='T', live_name=None)
+        with mock.patch.object(rt, 'open_youtube_stream') as youtube:
+            stub.on_row_activated(None, row)
+        youtube.assert_called_once_with('@h', '480p', title='T', name=None)
+
     def test_offline_right_click_still_dismisses(self):
         stub = self.Stub(online=False)
         stub.on_listbox_button_press = rt.RssTray.on_listbox_button_press.__get__(stub)

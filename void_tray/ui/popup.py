@@ -881,13 +881,13 @@ class PopupMixin:
             if self.popup:
                 self.popup.hide()
             open_twitch_stream(row.twitch_channel, getattr(row, 'twitch_quality', 'best'),
-                               title=getattr(row, 'live_title', None))
+                               title=getattr(row, 'live_title', None), name=getattr(row, 'live_name', None))
             return
         if hasattr(row, 'youtube_channel'):
             if self.popup:
                 self.popup.hide()
             open_youtube_stream(row.youtube_channel, getattr(row, 'youtube_quality', 'best'),
-                                title=getattr(row, 'live_title', None))
+                                title=getattr(row, 'live_title', None), name=getattr(row, 'live_name', None))
             return
         if hasattr(row, 'readlater_id'):
             self.open_read_later(row.readlater_id, row.link)

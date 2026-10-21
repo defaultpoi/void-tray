@@ -142,7 +142,7 @@ class TestConnectivityProbes(unittest.TestCase):
 
 
 class TestLiveRowStats(unittest.TestCase):
-    def build(self, entry):
+    def build(self, entry, name=None):
         """Runs the real row builder with GTK widgets mocked, collecting the labels' markup."""
         class Stub:
             _build_live_row = rt.RssTray._build_live_row
@@ -157,7 +157,7 @@ class TestLiveRowStats(unittest.TestCase):
                 mock.patch.object(rt.GLib, 'markup_escape_text', side_effect=lambda x: x), \
                 mock.patch.object(rt, 'is_stream_playing', return_value=False), \
                 mock.patch.object(rt.time_module, 'time', return_value=1_000_000.0):
-            Stub()._build_live_row(entry, 'Twitch', '#000000')
+            self.row = Stub()._build_live_row(entry, 'Twitch', '#000000', name)
         return labels
 
     def test_row_shows_user_category_viewers_and_elapsed(self):
@@ -166,6 +166,20 @@ class TestLiveRowStats(unittest.TestCase):
         self.assertIn('channel1', text)
         self.assertIn('Chess', text)
         self.assertIn('- 283 - 3h 21min', text)
+
+    def test_the_display_name_replaces_the_channel_in_the_row(self):
+        text = ' '.join(self.build({'channel': 'channel1', 'category': 'Chess', 'viewers': 5}, name='Some Name'))
+        self.assertIn('<b>Some Name</b> - Chess', text)
+        self.assertNotIn('channel1', text)
+
+    def test_without_a_display_name_the_channel_is_shown(self):
+        self.assertIn('<b>channel1</b>', ' '.join(self.build({'channel': 'channel1'})))
+
+    def test_the_row_remembers_the_name_for_the_player_window(self):
+        self.build({'channel': 'channel1'}, name='Some Name')
+        self.assertEqual(self.row.live_name, 'Some Name')
+        self.build({'channel': 'channel1'})
+        self.assertIsNone(self.row.live_name)
 
     def test_row_without_stats_has_no_dangling_separator(self):
         labels = self.build({'channel': 'channel1', 'category': 'Chess', 'title': 'T'})
