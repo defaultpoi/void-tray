@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from unittest import mock
 
 from facade import rt
 from helpers import TmpConfigCase
@@ -76,6 +77,66 @@ class TestState(TmpConfigCase):
         with open(rt.STATE_FILE) as f:
             self.assertEqual(json.load(f), {'a': 1})
         self.assertFalse(os.path.exists(rt.STATE_FILE + '.tmp'))
+
+
+
+class TestMediaState(TmpConfigCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(rt, 'MEDIA_FILE', os.path.join(self.dir, 'media.json'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, data):
+        with open(rt.MEDIA_FILE, 'w') as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+
+    def test_a_missing_file_starts_empty(self):
+        self.assertEqual(rt.load_media(), {'sources': {}})
+
+    def test_garbage_starts_empty(self):
+        for text in ('', '{not json', '[1, 2]', 'null', '{"sources": []}'):
+            self.write(text)
+            self.assertEqual(rt.load_media(), {'sources': {}}, text)
+
+    def test_what_is_saved_is_loaded(self):
+        entry = rt.new_media_entry()
+        entry.update(title='Show', baselined=True, watched=['a'], known=['a', 'b'], new=['b'],
+                     episodes=[{'id': 'a', 'title': 'A'}, {'id': 'b', 'title': 'B'}],
+                     files={'a': {'video': '/v/a.mp4', 'subs': ['/v/a.en.srt']}},
+                     last_watched={'id': 'a', 'title': 'A', 'at': 1.5})
+        rt.save_media({'sources': {'https://x.example/feed': entry}})
+        self.assertEqual(rt.load_media(), {'sources': {'https://x.example/feed': entry}})
+        self.assertFalse(os.path.exists(rt.MEDIA_FILE + '.tmp'))
+
+    def test_a_new_entry_has_every_field_the_code_reads(self):
+        self.assertEqual(rt.new_media_entry(), {'title': '', 'episodes': [], 'known': [], 'new': [], 'watched': [],
+                                                'files': {}, 'last_watched': None, 'baselined': False})
+
+    def test_fields_of_the_wrong_type_are_repaired(self):
+        self.write({'sources': {'https://x.example/f': {
+            'title': 5, 'episodes': 'many', 'known': {'a': 1}, 'new': None, 'watched': 'a', 'files': [], 'last_watched': 'a',
+            'baselined': 'yes'}}})
+        self.assertEqual(rt.load_media()['sources']['https://x.example/f'], rt.new_media_entry())
+
+    def test_wrong_items_inside_lists_are_dropped(self):
+        self.write({'sources': {'https://x.example/f': {
+            'episodes': [{'id': 'a'}, {'title': 'no id'}, 'text', {'id': 5}], 'watched': ['a', 5, None, 'b'],
+            'files': {'a': {'video': '/v/a.mp4'}, 'b': {'subs': []}, 'c': 'x', 'd': {'video': 5}},
+            'last_watched': {'title': 'no id'}}}})
+        entry = rt.load_media()['sources']['https://x.example/f']
+        self.assertEqual(entry['episodes'], [{'id': 'a'}])
+        self.assertEqual(entry['watched'], ['a', 'b'])
+        self.assertEqual(entry['files'], {'a': {'video': '/v/a.mp4'}})
+        self.assertIsNone(entry['last_watched'])
+
+    def test_a_source_that_is_not_an_object_is_dropped(self):
+        self.write({'sources': {'https://x.example/f': 'x', 'https://y.example/f': {}}})
+        self.assertEqual(list(rt.load_media()['sources']), ['https://y.example/f'])
+
+    def test_the_state_file_is_untouched(self):
+        rt.save_media({'sources': {}})
+        self.assertFalse(os.path.exists(rt.STATE_FILE))
 
 
 if __name__ == '__main__':

@@ -36,12 +36,13 @@ class TestRunWhenOnline(unittest.TestCase):
             initial_twitch_check = rt.RssTray.initial_twitch_check
             initial_youtube_check = rt.RssTray.initial_youtube_check
             initial_weather_check = rt.RssTray.initial_weather_check
+            initial_media_check = rt.RssTray.initial_media_check
         stub = Stub()
-        stub.start_check_thread = stub.start_twitch_check = stub.start_youtube_check = stub.start_weather_fetch = mock.Mock()
+        stub.start_check_thread = stub.start_twitch_check = stub.start_youtube_check = stub.start_weather_fetch = stub.start_media_check = mock.Mock()
         with mock.patch.object(rt, 'run_when_online') as run, mock.patch.object(rt, 'is_online') as probe:
-            for name in ('initial_check', 'initial_twitch_check', 'initial_youtube_check', 'initial_weather_check'):
+            for name in ('initial_check', 'initial_twitch_check', 'initial_youtube_check', 'initial_weather_check', 'initial_media_check'):
                 self.assertFalse(getattr(stub, name)())
-        self.assertEqual(run.call_count, 4)
+        self.assertEqual(run.call_count, 5)
         probe.assert_not_called()  # no blocking network probe on the calling (GTK) thread
 
 

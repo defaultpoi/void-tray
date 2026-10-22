@@ -105,6 +105,21 @@ def ensure_config():
             "# orphans=false hides the row that offers to remove orphaned packages (those\n"
             "# installed as dependencies that nothing needs any more, `xbps-query -O`).\n"
             "\n"
+            "[media]\n"
+            "# Podcasts, series and movies: the app checks these sources, keeps the next\n"
+            "# unwatched episodes downloaded (with subtitles) and plays them in mpv.\n"
+            "# path=<folder> downloads go to (default ~/videos)\n"
+            "# interval=<minutes> between checks (default 60, minimum 10)\n"
+            "# ahead=<n> unwatched episodes kept downloaded per source (default 2; 0 downloads\n"
+            "# only when you click)\n"
+            "# One source per line: url|display name (optional)|order (optional)\n"
+            "#   url: an archive.org collection or item (https://archive.org/details/...)\n"
+            "#        or any podcast / video RSS or Atom feed\n"
+            "#   order: oldest (a series, from its first episode; the default for archive.org)\n"
+            "#          or newest (a podcast, from the latest; the default for feeds)\n"
+            "# https://archive.org/details/some-collection|Some Series\n"
+            "# https://example.com/podcast.xml|Some Podcast|newest\n"
+            "\n"
             "[highlight]\n"
             "# News items whose title or categories contain one of these words pulse in\n"
             "# the popup (one per line, or several separated by |; default: breaking).\n"
@@ -163,7 +178,8 @@ def _read_config_sections():
     """Parses config.conf into {section: [lines]} for the known sections,
     each a list of raw non-comment, non-empty lines under that [section]."""
     sections = {'feeds': [], 'mute': [], 'twitch': [], 'weather': [], 'timer': [], 'youtube': [],
-                'updates': [], 'launcher': [], 'actions': [], 'schedule': [], 'network': [], 'highlight': []}
+                'updates': [], 'launcher': [], 'actions': [], 'schedule': [], 'network': [], 'highlight': [],
+                'media': []}
     current = None
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, encoding='utf-8', errors='replace') as f:
@@ -580,3 +596,54 @@ def _disable_weather_alerts():
 
 
 YOUTUBE_CHECK_INTERVAL_SECONDS = 900  # how often to poll YouTube live status
+
+
+DEFAULT_MEDIA_PATH = '~/videos'
+DEFAULT_MEDIA_CHECK_MINUTES = 60
+MIN_MEDIA_CHECK_MINUTES = 10
+DEFAULT_MEDIA_AHEAD = 2
+MAX_MEDIA_AHEAD = 20
+_MEDIA_SETTINGS = ('path', 'interval', 'ahead')
+
+
+def _media_setting(name):
+    for line in _read_config_sections()['media']:
+        key, sep, val = line.partition('=')
+        if sep and key.strip().lower() == name:
+            return val.split('#', 1)[0].strip()
+    return None
+
+
+def load_media_settings():
+    """{'path', 'interval' (seconds), 'ahead'} from [media], defaults for anything
+    missing or unusable."""
+    path = _media_setting('path') or DEFAULT_MEDIA_PATH
+    try:
+        minutes = max(MIN_MEDIA_CHECK_MINUTES, int(_media_setting('interval')))
+    except (TypeError, ValueError):
+        minutes = DEFAULT_MEDIA_CHECK_MINUTES
+    try:
+        ahead = min(MAX_MEDIA_AHEAD, max(0, int(_media_setting('ahead'))))
+    except (TypeError, ValueError):
+        ahead = DEFAULT_MEDIA_AHEAD
+    return {'path': os.path.expanduser(path), 'interval': minutes * 60, 'ahead': ahead}
+
+
+def load_media_sources():
+    """[(url, display name or None, order or None)] from [media], de-duplicated
+    by URL (first line wins). Lines that are not http(s) URLs, and the path,
+    interval and ahead settings, are not sources."""
+    sources, seen = [], set()
+    for line in _read_config_sections()['media']:
+        key, sep, _val = line.partition('=')
+        if sep and key.strip().lower() in _MEDIA_SETTINGS:
+            continue
+        parts = [p.strip() for p in line.split('|', 2)]
+        url = parts[0]
+        if not url.lower().startswith(('http://', 'https://')) or url in seen:
+            continue
+        seen.add(url)
+        name = parts[1] if len(parts) > 1 and parts[1] else None
+        order = parts[2].lower() if len(parts) > 2 and parts[2].lower() in ('oldest', 'newest') else None
+        sources.append((url, name, order))
+    return sources

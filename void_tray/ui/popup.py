@@ -512,8 +512,10 @@ class PopupMixin:
         show_orphans = load_orphan_nudge() and bool(orphans or self.orphan_status)
 
         any_live = bool(live_channels or live_youtube_channels)
-        truly_empty = not unread and not available and not any_live
-        only_live_remains = (not unread and not available) and any_live
+        media_urls = self.media_source_urls()
+        # like live channels, media never holds the popup open or fills it once it is showing
+        truly_empty = not unread and not available and not any_live and not media_urls
+        only_live_remains = (not unread and not available) and (any_live or bool(media_urls))
         popup_already_visible = bool(self.popup and self.popup.get_visible())
         should_hide = truly_empty or (only_live_remains and popup_already_visible)
         close_popup = should_hide and not keep_open and not self.orphan_status and not self.update_summary
@@ -547,6 +549,14 @@ class PopupMixin:
                     self.listbox.add(self.build_twitch_row(entry))
                 for entry in live_youtube_channels:
                     self.listbox.add(self.build_youtube_row(entry))
+
+            if media_urls:
+                self.listbox.add(self.build_header_row(
+                    '__media__', 'Media', is_first=is_first_section, clickable=False
+                ))
+                is_first_section = False
+                for url in media_urls:
+                    self.listbox.add(self.build_media_row(url))
 
             if unread:
                 shown = unread[:MAX_LIST_ITEMS]
@@ -888,6 +898,9 @@ class PopupMixin:
                 self.popup.hide()
             open_youtube_stream(row.youtube_channel, getattr(row, 'youtube_quality', 'best'),
                                 title=getattr(row, 'live_title', None), name=getattr(row, 'live_name', None))
+            return
+        if hasattr(row, 'media_source'):  # works offline: a downloaded episode needs no network
+            self.on_media_row_clicked(row.media_source)
             return
         if hasattr(row, 'readlater_id'):
             self.open_read_later(row.readlater_id, row.link)

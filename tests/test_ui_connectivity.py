@@ -25,6 +25,7 @@ class TestOfflineBehavior(unittest.TestCase):
             self.start_weather_fetch = mock.Mock()
             self.start_twitch_check = mock.Mock()
             self.start_youtube_check = mock.Mock()
+            self.start_media_check = mock.Mock()
             self.removed = []
             self.updates = 0
             self.refreshes = 0
@@ -67,6 +68,13 @@ class TestOfflineBehavior(unittest.TestCase):
         stub.mark_feed_read = mock.Mock()
         stub.on_row_activated(None, mock.Mock(spec=['header_feed_url'], header_feed_url='https://a'))
         stub.mark_feed_read.assert_called_once_with('https://a')
+
+    def test_a_media_row_plays_or_downloads_even_offline(self):
+        for online in (True, False):
+            stub = self.Stub(online=online)
+            stub.on_media_row_clicked = mock.Mock()
+            stub.on_row_activated(None, mock.Mock(spec=['media_source'], media_source='https://example.com/feed.xml'))
+            stub.on_media_row_clicked.assert_called_once_with('https://example.com/feed.xml')  # a ready file needs no network
 
     def test_offline_install_all_header_does_nothing(self):
         stub = self.Stub(online=False)
@@ -155,7 +163,7 @@ class TestReconnectCatchUp(unittest.TestCase):
     def test_coming_back_online_triggers_every_refresh_once(self):
         stub = TestOfflineBehavior.Stub(online=False)
         stub._set_online(True)
-        for name in ('start_check_thread', 'start_weather_fetch', 'start_twitch_check', 'start_youtube_check'):
+        for name in ('start_check_thread', 'start_weather_fetch', 'start_twitch_check', 'start_youtube_check', 'start_media_check'):
             getattr(stub, name).assert_called_once()
 
     def test_going_offline_or_staying_online_triggers_nothing(self):
@@ -242,7 +250,7 @@ class TestImmediateProbes(unittest.TestCase):
     def test_tooltip_is_cleared_when_back_online(self):
         stub = self.Stub(online=False)
         stub.offline_banner = mock.MagicMock()
-        for name in ('start_check_thread', 'start_weather_fetch', 'start_twitch_check', 'start_youtube_check'):
+        for name in ('start_check_thread', 'start_weather_fetch', 'start_twitch_check', 'start_youtube_check', 'start_media_check'):
             setattr(stub, name, mock.Mock())
         with mock.patch.object(rt, '_log'):
             stub._set_online(True)

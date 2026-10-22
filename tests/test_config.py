@@ -535,6 +535,66 @@ class TestFetchAlertsBg(TmpConfigCase):
         self.assertTrue(rt.load_weather_settings()['alerts_enabled'])
 
 
+class TestMediaConfig(TmpConfigCase):
+    def test_defaults_without_a_section(self):
+        self.conf('[feeds]\nhttps://example.com/feed.xml\n')
+        self.assertEqual(rt.load_media_settings(),
+                         {'path': os.path.expanduser('~/videos'), 'interval': 3600, 'ahead': 2})
+        self.assertEqual(rt.load_media_sources(), [])
+
+    def test_defaults_without_a_config_file(self):
+        self.assertEqual(rt.load_media_settings()['ahead'], 2)
+        self.assertEqual(rt.load_media_sources(), [])
+
+    def test_settings_are_read_and_the_path_is_expanded(self):
+        self.conf('[media]\npath=~/shows\ninterval=30\nahead=4\n')
+        self.assertEqual(rt.load_media_settings(), {'path': os.path.expanduser('~/shows'), 'interval': 1800, 'ahead': 4})
+
+    def test_the_interval_has_a_minimum_and_ahead_a_range(self):
+        self.conf('[media]\ninterval=1\nahead=500\n')
+        self.assertEqual(rt.load_media_settings()['interval'], 600)
+        self.assertEqual(rt.load_media_settings()['ahead'], rt.MAX_MEDIA_AHEAD)
+        self.conf('[media]\nahead=-3\n')
+        self.assertEqual(rt.load_media_settings()['ahead'], 0)  # 0 is allowed: download only on a click
+
+    def test_unusable_numbers_fall_back_to_the_defaults(self):
+        self.conf('[media]\ninterval=often\nahead=\n')
+        self.assertEqual((rt.load_media_settings()['interval'], rt.load_media_settings()['ahead']), (3600, 2))
+
+    def test_comments_after_a_setting_are_ignored(self):
+        self.conf('[media]\nahead=3  # three\npath=/data/videos # here\n')
+        self.assertEqual((rt.load_media_settings()['ahead'], rt.load_media_settings()['path']), (3, '/data/videos'))
+
+    def test_sources_are_url_name_and_order(self):
+        self.conf('[media]\nahead=1\nhttps://archive.org/details/show|Some Series\n'
+                  'https://example.com/pod.xml|A Podcast|newest\nhttps://example.com/other.xml\n'
+                  'http://example.com/x.xml||oldest\n')
+        self.assertEqual(rt.load_media_sources(), [
+            ('https://archive.org/details/show', 'Some Series', None),
+            ('https://example.com/pod.xml', 'A Podcast', 'newest'),
+            ('https://example.com/other.xml', None, None),
+            ('http://example.com/x.xml', None, 'oldest')])
+
+    def test_a_url_with_a_query_string_is_a_source_not_a_setting(self):
+        self.conf('[media]\nhttps://example.com/feed?format=rss&x=1|Name\n')
+        self.assertEqual(rt.load_media_sources(), [('https://example.com/feed?format=rss&x=1', 'Name', None)])
+
+    def test_the_order_is_case_insensitive_and_unknown_orders_are_ignored(self):
+        self.conf('[media]\nhttps://a.example/x|A|NEWEST\nhttps://b.example/x|B|sideways\n')
+        self.assertEqual([s[2] for s in rt.load_media_sources()], ['newest', None])
+
+    def test_duplicates_and_non_urls_are_skipped(self):
+        self.conf('[media]\nhttps://a.example/x|First\nhttps://a.example/x|Second\nnot a url\nftp://a.example/x\n')
+        self.assertEqual(rt.load_media_sources(), [('https://a.example/x', 'First', None)])
+
+    def test_the_template_documents_the_section(self):
+        rt.ensure_config()
+        text = open(rt.CONFIG_FILE).read()
+        for expected in ('[media]', 'path=<folder>', 'ahead=<n>', 'url|display name (optional)|order (optional)', 'archive.org'):
+            self.assertIn(expected, text)
+        self.assertEqual(rt.load_media_sources(), [])  # its examples are comments
+
+
 class TestTwitchQuality(TmpConfigCase):
     def test_channels_still_just_names(self):
         self.conf('[twitch]\nfoo\nbar||720p60\n')

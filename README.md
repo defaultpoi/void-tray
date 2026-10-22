@@ -23,6 +23,16 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 - **YouTube Live:** live channels are polled (every 15 minutes by default, `interval=` in `[youtube]`; same per-channel schedules) via `streamlink --json <channel>/live` per channel -- no API key, and the same extraction path used for actual playback, so the check can't disagree with what clicking the row does. There's no keyless batch API for YouTube, so this is one streamlink call per channel (heavier than Twitch's single batched request). Shares the same "Live now" list, quality config, and browser fallback as Twitch. Viewers and elapsed time come from one extra request to the live page for each channel that is live (best effort: if YouTube doesn't give them, the row simply omits them).
 - **Player window titles:** mpv's title is `<Site> · <name> · <stream title>` for both platforms, with the configured display name when the channel has one and otherwise the name the platform gives.
 
+### Podcasts, series and movies
+
+- **Sources** (`[media]` in `config.conf`, one per line: `url|display name|order`): an [archive.org](https://archive.org) collection (each item an episode) or item (each video or audio file an episode, so a movie is one), or any podcast or video RSS/Atom feed with audio or video enclosures. Everything is DRM-free. Sites that need a login, or that protect their streams (the usual streaming services), are not supported.
+- **Checking:** every hour by default (`interval=<minutes>`, minimum 10), and again as soon as the network is back. A source that cannot be read keeps what is known of it until the next check. The first check only sets the baseline: nothing is announced for what already exists.
+- **Order:** an archive.org source is read as a series, from its first episode (`oldest`); a feed is read as a podcast, starting at its latest episode (`newest`) and skipping the backlog. Set the third field to the other one to change that. Episodes are ordered by `S01E05` / `1x05` in their titles where there are some, otherwise by date.
+- **Downloads:** the next `ahead=<n>` unwatched episodes of every source (2 by default; `0` downloads only when you click) are kept on disk, one download at a time, into `path=<folder>` (default `~/videos`) as `<Source>/<Source> - S01E05 - <Title>.mp4` (the date instead of the number when the title has none, and the series name and number are cut from the title since they are already there). Downloads resume where they stopped after an interruption or a restart, and a failed one is retried at the next check or by clicking its row. For archive.org the h.264 version is preferred over the original and the small derivatives. Nothing is deleted when an episode is watched.
+- **Subtitles:** every subtitle file (`.srt`, `.vtt`, `.ass`) an archive.org item has is saved next to the video with its language, `<name>.en.srt`, and mpv loads them on its own. RSS feeds carry none.
+- **The popup:** a **Media** section under the live channels with one row per source: `Source - S01E05 Title - ready - 2 new`. The marker is green when the next episode is on disk, amber while it is queued or downloading (with the percent), red when the download failed (the reason is in the tooltip, which also shows the unwatched count and the last episode watched) and grey when it is not downloaded. Click the row to play the next unwatched episode in the shared mpv window, or to download it first if it is not on disk. New episodes open the popup and play the notification sound, like a channel going live; the section never counts in the tray badge and, like the live channels, does not keep the popup open once it is showing. Downloads update the rows in place.
+- **Watched:** an episode counts as watched when playback reached 90 % of it, or got to its last 20 seconds after at least half; the next one is then downloaded. Where you stopped inside an episode is not remembered. The state (episode lists, what is watched and downloaded) is in `media.json` next to `state.json`.
+
 ### Weather
 
 - **Weather** (Open-Meteo): today's temperature, high/low, wind and rain, with a 5-day forecast behind the `›` button (it turns into `‹` in the same spot, so a second click on it goes back). The popup is as wide as the wider of the two views needs, anchored to the right edge of the screen: two-digit or negative forecast temperatures make it grow to the left, and it does not change size when you switch views. Refreshed every 30 minutes by default (`interval=<minutes>` in `[weather]`, minimum 5).
@@ -54,7 +64,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 - Python 3, PyGObject (GTK3), pycairo, `feedparser`
 - `xbps-install` / `xbps-query` for update detection (Void Linux only)
 - `topgrade` (optional, `sudo xbps-install topgrade`) to install updates with it; see [Passwordless updates](#passwordless-updates-optional)
-- `streamlink` and `mpv` for Twitch and YouTube Live streams
+- `streamlink` and `mpv` for Twitch and YouTube Live streams; `mpv` also plays the podcasts, series and movies
 - A command-line audio player for the notification sound
 
 ```bash
@@ -138,6 +148,18 @@ interval=15
 quality=720p,480p,best
 @somehandle|Some Name
 channel/UCxxxxxxxxxxxxxxxxxxxxxx|Other Name|720p60
+
+[media]
+# path=<folder> downloads go to (default ~/videos)
+# interval=<minutes> between checks (default 60, minimum 10)
+# ahead=<n> unwatched episodes kept downloaded per source (default 2; 0 = only on a click)
+# One source per line: url|display name (optional)|order (optional)
+#   url: an archive.org collection or item, or any podcast / video RSS or Atom feed
+#   order: oldest (a series, from its first episode; the default for archive.org)
+#          or newest (a podcast, from the latest; the default for feeds)
+path=~/videos
+https://archive.org/details/some-collection|Some Series
+https://example.com/podcast.xml|Some Podcast|newest
 
 [weather]
 # lat|lon for the weather bar (Open-Meteo, no key needed); the weather

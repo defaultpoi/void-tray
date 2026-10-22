@@ -307,5 +307,178 @@ class TestSharedMpv(unittest.TestCase):
             self.assertFalse(rt._ensure_mpv())
 
 
+
+class FakeMpvSocket:
+    """A unix socket speaking enough of mpv's JSON IPC to answer get_property."""
+
+    def __init__(self, path, properties, hang_up=False):
+        import socket
+        import threading
+        self.path = path
+        self.properties = properties
+        self.hang_up = hang_up
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(path)
+        self.sock.listen(1)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        import json
+        conn, _ = self.sock.accept()
+        with conn:
+            buf = b''
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk or self.hang_up:
+                    return
+                buf += chunk
+                *lines, buf = buf.split(b'\n')
+                for line in lines:
+                    request = json.loads(line)
+                    name = request['command'][1]
+                    conn.sendall(b'{"event": "property-change"}\n')  # events come between replies
+                    if name in self.properties:
+                        reply = {'data': self.properties[name], 'request_id': request['request_id'], 'error': 'success'}
+                    else:
+                        reply = {'request_id': request['request_id'], 'error': 'property unavailable'}
+                    conn.sendall((json.dumps(reply) + '\n').encode())
+
+    def close(self):
+        self.sock.close()
+
+
+class TestMpvProperties(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = self.dir + '/mpv.sock'
+        patcher = mock.patch.object(rt, 'MPV_IPC_SOCKET', self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def serve(self, properties, **kwargs):
+        server = FakeMpvSocket(self.path, properties, **kwargs)
+        self.addCleanup(server.close)
+
+    def test_properties_come_back_by_name(self):
+        self.serve({'path': '/v/a.mp4', 'percent-pos': 41.5})
+        self.assertEqual(rt._mpv_get_properties(['path', 'percent-pos']), {'path': '/v/a.mp4', 'percent-pos': 41.5})
+
+    def test_a_property_mpv_cannot_give_is_none(self):
+        self.serve({'path': '/v/a.mp4'})
+        self.assertEqual(rt._mpv_get_properties(['path', 'time-remaining']), {'path': '/v/a.mp4', 'time-remaining': None})
+
+    def test_an_mpv_that_is_not_running_gives_none(self):
+        self.assertIsNone(rt._mpv_get_properties(['path']))
+
+    def test_an_mpv_that_hangs_up_gives_none(self):
+        self.serve({}, hang_up=True)
+        self.assertIsNone(rt._mpv_get_properties(['path']))
+
+
+class TestCountsAsWatched(unittest.TestCase):
+    def test_through_to_the_credits(self):
+        self.assertTrue(rt.counts_as_watched(95.0, 60.0))
+        self.assertTrue(rt.counts_as_watched(90.0, None))
+
+    def test_the_last_seconds_of_something_mostly_played(self):
+        self.assertTrue(rt.counts_as_watched(75.0, 12.0))
+        self.assertFalse(rt.counts_as_watched(75.0, 300.0))
+
+    def test_a_clip_that_was_barely_started_is_not_watched(self):
+        self.assertFalse(rt.counts_as_watched(10.0, 5.0))
+
+    def test_never_seen_playing_is_not_watched(self):
+        self.assertFalse(rt.counts_as_watched(None, None))
+        self.assertFalse(rt.counts_as_watched(None, 3.0))
+
+    def test_stopped_part_way(self):
+        self.assertFalse(rt.counts_as_watched(40.0, 900.0))
+
+
+class TestWatchLocalPlayback(unittest.TestCase):
+    def watch(self, script, clock=None):
+        """Runs the watcher over scripted poll results; returns what on_finished got."""
+        results = iter(script)
+        done = []
+        with mock.patch.object(rt, '_mpv_get_properties', side_effect=lambda names: next(results)), \
+                mock.patch.object(rt.time_module, 'sleep'), \
+                mock.patch.object(rt.time_module, 'monotonic', side_effect=clock or (lambda: 0.0)):
+            rt._watch_local_playback('/v/a.mp4', lambda percent, remaining: done.append((percent, remaining)))
+        return done
+
+    @staticmethod
+    def at(percent, remaining, path='/v/a.mp4'):
+        return {'path': path, 'percent-pos': percent, 'time-remaining': remaining}
+
+    def test_it_reports_the_furthest_point_when_mpv_quits(self):
+        self.assertEqual(self.watch([self.at(5, 95), self.at(50, 50), self.at(96, 4), None]), [(96, 4)])
+
+    def test_it_keeps_the_best_even_if_the_person_seeks_back(self):
+        self.assertEqual(self.watch([self.at(80, 20), self.at(10, 90), None]), [(80, 20)])
+
+    def test_it_waits_for_the_file_to_load(self):
+        idle = {'path': None, 'percent-pos': None, 'time-remaining': None}
+        self.assertEqual(self.watch([idle, idle, self.at(30, 70), None]), [(30, 70)])
+
+    def test_another_file_taking_its_place_ends_the_watch(self):
+        other = self.at(1, 99, path='/v/b.mp4')
+        self.assertEqual(self.watch([self.at(60, 40), other, self.at(99, 1)]), [(60, 40)])
+
+    def test_a_file_that_never_loads_gives_up(self):
+        idle = {'path': '/v/other.mp4', 'percent-pos': 1, 'time-remaining': 9}
+        ticks = iter([0.0, 1.0, rt.WATCH_LOAD_TIMEOUT_SECONDS + 1])
+        self.assertEqual(self.watch([idle, idle, idle], clock=lambda: next(ticks)), [(None, None)])
+
+    def test_mpv_gone_before_anything_loaded(self):
+        self.assertEqual(self.watch([None]), [(None, None)])
+
+    def test_values_that_are_not_numbers_are_ignored(self):
+        bad = {'path': '/v/a.mp4', 'percent-pos': 'x', 'time-remaining': None}
+        self.assertEqual(self.watch([bad, self.at(20, 80), None]), [(20, 80)])
+
+
+class TestPlayMediaFile(unittest.TestCase):
+    def test_a_file_is_loaded_with_its_title_and_watched(self):
+        done = mock.Mock()
+        with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/mpv'), \
+                mock.patch.object(rt, '_load_in_mpv', return_value=True) as load, \
+                mock.patch.object(rt.threading, 'Thread') as thread:
+            self.assertTrue(rt.play_media_file('/v/a.mp4', 'Show \u00b7 Pilot', done))
+        load.assert_called_once_with('/v/a.mp4', 'Show \u00b7 Pilot')
+        self.assertEqual(thread.call_args.kwargs['target'], rt._watch_local_playback)
+        self.assertEqual(thread.call_args.kwargs['args'], ('/v/a.mp4', done))
+        thread.return_value.start.assert_called_once_with()
+
+    def test_without_a_callback_nothing_is_watched(self):
+        with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/mpv'), \
+                mock.patch.object(rt, '_load_in_mpv', return_value=True), \
+                mock.patch.object(rt.threading, 'Thread') as thread:
+            self.assertTrue(rt.play_media_file('/v/a.mp4', 'T'))
+        thread.assert_not_called()
+
+    def test_an_mpv_that_cannot_start_means_false_and_no_watch(self):
+        with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/mpv'), \
+                mock.patch.object(rt, '_load_in_mpv', return_value=False), \
+                mock.patch.object(rt.threading, 'Thread') as thread:
+            self.assertFalse(rt.play_media_file('/v/a.mp4', 'T', mock.Mock()))
+        thread.assert_not_called()
+
+    def test_without_mpv_the_desktop_default_player_gets_the_file(self):
+        with mock.patch.object(rt.shutil, 'which', return_value=None), \
+                mock.patch.object(rt.subprocess, 'Popen') as popen, \
+                mock.patch.object(rt, '_load_in_mpv') as load:
+            self.assertTrue(rt.play_media_file('/v/a.mp4', 'T', mock.Mock()))
+        self.assertEqual(popen.call_args.args[0], ['xdg-open', '/v/a.mp4'])
+        load.assert_not_called()
+
+    def test_without_mpv_or_xdg_open_it_says_so(self):
+        with mock.patch.object(rt.shutil, 'which', return_value=None), \
+                mock.patch.object(rt.subprocess, 'Popen', side_effect=OSError):
+            self.assertFalse(rt.play_media_file('/v/a.mp4', 'T'))
+
+
 if __name__ == '__main__':
     unittest.main()

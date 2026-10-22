@@ -8,6 +8,7 @@ from .constants import CONFIG_DIR
 
 
 STATE_FILE = os.path.join(CONFIG_DIR, 'state.json')
+MEDIA_FILE = os.path.join(CONFIG_DIR, 'media.json')  # kept apart: episode lists are long
 
 
 def load_state():
@@ -58,3 +59,51 @@ def save_state(state):
     with open(tmp, 'w') as f:
         json.dump(state, f)
     os.replace(tmp, STATE_FILE)
+
+
+def _clean_media_entry(entry):
+    """One source's stored entry with every field the code reads present and of
+    the right type; entries of the wrong shape inside lists are dropped."""
+    def strings(value):
+        return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+    files = entry.get('files')
+    last = entry.get('last_watched')
+    return {
+        'title': entry['title'] if isinstance(entry.get('title'), str) else '',
+        'episodes': [e for e in entry.get('episodes', []) if isinstance(e, dict) and isinstance(e.get('id'), str)]
+        if isinstance(entry.get('episodes'), list) else [],
+        'known': strings(entry.get('known')),
+        'new': strings(entry.get('new')),
+        'watched': strings(entry.get('watched')),
+        'files': {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, dict)
+                  and isinstance(v.get('video'), str)} if isinstance(files, dict) else {},
+        'last_watched': last if isinstance(last, dict) and isinstance(last.get('id'), str) else None,
+        'baselined': entry.get('baselined') is True,
+    }
+
+
+def new_media_entry():
+    return _clean_media_entry({})
+
+
+def load_media():
+    """media.json as {'sources': {url: entry}}; a missing or unreadable file
+    starts empty."""
+    media = {'sources': {}}
+    try:
+        with open(MEDIA_FILE) as f:
+            loaded = json.load(f)
+    except (OSError, ValueError):
+        return media
+    if isinstance(loaded, dict) and isinstance(loaded.get('sources'), dict):
+        for url, entry in loaded['sources'].items():
+            if isinstance(url, str) and isinstance(entry, dict):
+                media['sources'][url] = _clean_media_entry(entry)
+    return media
+
+
+def save_media(media):
+    tmp = MEDIA_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(media, f)
+    os.replace(tmp, MEDIA_FILE)

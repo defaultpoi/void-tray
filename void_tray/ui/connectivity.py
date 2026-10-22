@@ -89,6 +89,7 @@ class ConnectivityMixin:
             self.start_weather_fetch()
             self.start_twitch_check()
             self.start_youtube_check()
+            self.start_media_check()
 
     def on_network_reset_clicked(self, _button):
         command = load_network_reset_command()

@@ -141,6 +141,93 @@ def _load_in_mpv(stream_url, title):
     return False
 
 
+def _mpv_get_properties(names, timeout=2.0):
+    """{name: value} for mpv properties over the IPC socket; a property mpv cannot
+    give right now (nothing loaded yet) is None. None when mpv is not reachable."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(MPV_IPC_SOCKET)
+        for number, name in enumerate(names, 1):
+            sock.sendall((json.dumps({'command': ['get_property', name], 'request_id': number}) + '\n').encode())
+        values, buf = {}, b''
+        while len(values) < len(names):
+            chunk = sock.recv(4096)
+            if not chunk:
+                return None
+            buf += chunk
+            *lines, buf = buf.split(b'\n')
+            for line in lines:
+                try:
+                    reply = json.loads(line)
+                except ValueError:
+                    continue
+                if 'request_id' in reply and 'error' in reply:  # events have neither
+                    values[names[reply['request_id'] - 1]] = reply.get('data') if reply['error'] == 'success' else None
+        return values
+    except (OSError, IndexError, TypeError):
+        return None
+    finally:
+        sock.close()
+
+
+WATCH_POLL_SECONDS = 2.0
+WATCH_LOAD_TIMEOUT_SECONDS = 30.0
+WATCHED_PERCENT = 90.0
+WATCHED_REMAINING_SECONDS = 20.0
+
+
+def counts_as_watched(percent, remaining):
+    """Whether a playback that got as far as `percent` of the file, with `remaining`
+    seconds left at its furthest point, was watched: through to the credits, or the
+    last few seconds of anything that was at least half played. Polling is coarse,
+    so the very end of a short file is often never seen."""
+    if percent is None:
+        return False
+    return percent >= WATCHED_PERCENT or (percent >= 50 and remaining is not None and remaining <= WATCHED_REMAINING_SECONDS)
+
+
+def _watch_local_playback(path, on_finished, poll=WATCH_POLL_SECONDS):
+    """Follows `path` in the shared mpv until it is replaced or mpv quits, then calls
+    on_finished(furthest_percent, least_seconds_remaining) (None where never seen)."""
+    percent = remaining = None
+    loaded = False
+    started = time_module.monotonic()
+    while True:
+        values = _mpv_get_properties(['path', 'percent-pos', 'time-remaining'])
+        if values is None:  # mpv is gone: it quits when the file ends
+            break
+        if values.get('path') == path:
+            loaded = True
+            here, left = values.get('percent-pos'), values.get('time-remaining')
+            if isinstance(here, (int, float)) and (percent is None or here > percent):
+                percent = here
+            if isinstance(left, (int, float)) and (remaining is None or left < remaining):
+                remaining = left
+        elif loaded or time_module.monotonic() - started > WATCH_LOAD_TIMEOUT_SECONDS:
+            break  # another file took its place, or it never loaded
+        time_module.sleep(poll)
+    on_finished(percent, remaining)
+
+
+def play_media_file(path, title, on_finished=None):
+    """Plays a local file in the shared mpv window; subtitles saved next to it with
+    the same name load on their own. True when it was handed to a player. With
+    on_finished, a thread reports how far playback got (see _watch_local_playback);
+    without mpv the file goes to the desktop's default player, untracked."""
+    if not shutil.which('mpv'):
+        try:
+            subprocess.Popen(['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except OSError:
+            return False
+    if not _load_in_mpv(path, title):
+        return False
+    if on_finished:
+        threading.Thread(target=_watch_local_playback, args=(path, on_finished), daemon=True).start()
+    return True
+
+
 def _stop_streamlink():
     global _streamlink_proc
     with _player_lock:

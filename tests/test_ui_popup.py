@@ -320,6 +320,9 @@ class TestRefreshListOrphans(unittest.TestCase):
             self.build_row = mock.Mock(return_value=mock.MagicMock())
             self.build_info_row = mock.Mock(return_value=mock.MagicMock())
             self.build_twitch_row = self.build_youtube_row = mock.Mock(return_value=mock.MagicMock())
+            self.media_urls = []
+            self.media_source_urls = lambda: list(self.media_urls)
+            self.build_media_row = mock.Mock(return_value=mock.MagicMock())
 
     def refresh(self, stub, nudge=True):
         with mock.patch.object(rt, 'Gtk', mock.MagicMock()), \
@@ -330,6 +333,34 @@ class TestRefreshListOrphans(unittest.TestCase):
 
     def unread(self, n=2):
         return [{'id': str(i), 'title': f'Item {i}', 'link': 'l', 'feed_url': 'f'} for i in range(n)]
+
+    def test_media_alone_fills_a_popup_that_is_opened_by_hand(self):
+        stub = self.Stub({})
+        stub.media_urls = ['https://example.com/feed.xml', 'https://archive.org/details/x']
+        self.refresh(stub)
+        self.assertEqual(stub.headers, ['__media__'])
+        self.assertEqual([c.args[0] for c in stub.build_media_row.call_args_list], stub.media_urls)
+        stub.popup.hide.assert_not_called()
+
+    def test_media_comes_after_the_live_channels_and_before_the_news(self):
+        stub = self.Stub({'unread': self.unread(), 'live_channels': [{'channel': 'a'}]})
+        stub.media_urls = ['https://example.com/feed.xml']
+        self.refresh(stub)
+        self.assertEqual(stub.headers[:2], ['__live__', '__media__'])
+        self.assertGreater(len(stub.headers), 2)  # the news follows
+
+    def test_a_media_only_popup_that_is_already_open_collapses_like_one_with_only_live_channels(self):
+        stub = self.Stub({}, popup_visible=True)
+        stub.media_urls = ['https://example.com/feed.xml']
+        self.refresh(stub)
+        self.assertEqual(stub.headers, [])  # "No unread items"; media rows are updated in place instead
+        stub.build_media_row.assert_not_called()
+        stub.popup.hide.assert_called()
+
+    def test_without_media_there_is_no_section(self):
+        stub = self.Stub({'unread': self.unread()})
+        self.refresh(stub)
+        self.assertNotIn('__media__', stub.headers)
 
     def test_orphans_alone_are_still_offered_on_a_hand_opened_popup(self):
         stub = self.Stub({'orphans': ['libfoo']})

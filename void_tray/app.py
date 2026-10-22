@@ -7,24 +7,26 @@ import threading
 from .gi_env import GLib, GLibUnix, Gtk
 from .config import (
     ensure_config,
+    load_media_settings,
     load_twitch_check_interval,
     load_weather_refresh_interval,
     load_youtube_check_interval,
     migrate_legacy_config,
 )
 from .constants import DEFAULT_HIGHLIGHT_WORDS
-from .state import load_state
+from .state import load_media, load_state
 from .ui.connectivity import ConnectivityMixin
 from .ui.feeds import FeedsMixin
 from .ui.icon import IconMixin
 from .ui.live import LiveMixin
+from .ui.media import MediaMixin
 from .ui.popup import PopupMixin, WINDOW_WIDTH
 from .ui.timer import TimerMixin
 from .ui.updates import UpdatesMixin
 from .ui.weather import WeatherMixin
 
 
-class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, TimerMixin, UpdatesMixin, WeatherMixin):
+class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, MediaMixin, PopupMixin, TimerMixin, UpdatesMixin, WeatherMixin):
     def __init__(self):
         ensure_config()
         self.state = load_state()
@@ -33,6 +35,14 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         self._xbps_lock = threading.Lock()   # guards xbps db access (scans + installs), separately
         self._twitch_lock = threading.Lock()  # guards overlapping Twitch-check cycles
         self._youtube_lock = threading.Lock()  # guards overlapping YouTube-check cycles
+        self.media = load_media()  # podcasts, series and movies (media.json)
+        self.media_status = {}  # (source url, episode id) -> download progress, in memory only
+        self._media_check_lock = threading.Lock()  # guards overlapping media-check cycles
+        self._media_data_lock = threading.Lock()  # guards self.media
+        self._media_queue_lock = threading.Lock()  # guards the download queue below
+        self._media_queue = []
+        self._media_current = None
+        self._media_worker_running = False
         self.popup = None
         self.popup_width = WINDOW_WIDTH  # WINDOW_WIDTH, or wider when the weather bar needs it (see _fit_popup_width)
         self.listbox = None
@@ -111,6 +121,8 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, PopupMixin, T
         GLib.timeout_add_seconds(load_twitch_check_interval(), self.periodic_twitch_check)
         GLib.timeout_add_seconds(4, self.initial_youtube_check)
         GLib.timeout_add_seconds(load_youtube_check_interval(), self.periodic_youtube_check)
+        GLib.timeout_add_seconds(5, self.initial_media_check)
+        GLib.timeout_add_seconds(load_media_settings()['interval'], self.periodic_media_check)
         GLib.timeout_add_seconds(1, self._timer_tick)
         GLib.timeout_add_seconds(1, lambda: self.probe_connectivity() and False)
         GLib.timeout_add_seconds(OFFLINE_PROBE_SECONDS, self.probe_connectivity)
