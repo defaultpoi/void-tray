@@ -13,6 +13,10 @@ LEGACY_CONFIG_DIR = os.path.expanduser('~/.config/rss-tray')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.conf')
 
 
+# Python files here add sources to the Media section (see "Media plugins" in the README).
+MEDIA_PLUGIN_DIR = os.path.join(CONFIG_DIR, 'media-plugins')
+
+
 DEFAULT_HIGHLIGHT_WORDS = ('breaking',)
 
 

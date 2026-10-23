@@ -25,13 +25,61 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 
 ### Podcasts, series and movies
 
-- **Sources** (`[media]` in `config.conf`, one per line: `url|display name|order`): an [archive.org](https://archive.org) collection (each item an episode) or item (each video or audio file an episode, so a movie is one), or any podcast or video RSS/Atom feed with audio or video enclosures. Everything is DRM-free. Sites that need a login, or that protect their streams (the usual streaming services), are not supported.
+- **Sources** (`[media]` in `config.conf`, one per line: `source|display name|order`): an [archive.org](https://archive.org) collection (each item an episode) or item (each video or audio file an episode, so a movie is one); a **YouTube** channel, playlist or video, read by yt-dlp (a channel's *Podcasts* tab is a list of shows: each show is opened and its episodes used; its *Videos* tab or one show's playlist work as well); any podcast or video RSS/Atom feed with audio or video enclosures; `yt-dlp:<url>` for any other site yt-dlp supports (Vimeo, Twitch videos, PeerTube, ...); or a plugin of your own, for any site at all (see Media plugins below). Everything is DRM-free: sites that need a login or that protect their streams (the usual streaming services) do not work, unless yt-dlp itself can read them with the cookies you give it in `ytdlp=`.
 - **Checking:** every hour by default (`interval=<minutes>`, minimum 10), and again as soon as the network is back. A source that cannot be read keeps what is known of it until the next check. The first check only sets the baseline: nothing is announced for what already exists.
-- **Order:** an archive.org source is read as a series, from its first episode (`oldest`); a feed is read as a podcast, starting at its latest episode (`newest`) and skipping the backlog. Set the third field to the other one to change that. Episodes are ordered by `S01E05` / `1x05` in their titles where there are some, otherwise by date.
+- **Order:** an archive.org source is read as a series, from its first episode (`oldest`); a feed or a YouTube channel is read as a podcast, starting at its latest episode (`newest`) and skipping the backlog (a plugin says which it is with its `ORDER`; a YouTube playlist that is a series wants `|oldest`). Set the third field to the other one to change that. Episodes are ordered by `S01E05` / `1x05` in their titles where there are some, otherwise by date.
 - **Downloads:** the next `ahead=<n>` unwatched episodes of every source (2 by default; `0` downloads only when you click) are kept on disk, one download at a time, into `path=<folder>` (default `~/videos`) as `<Source>/<Source> - S01E05 - <Title>.mp4` (the date instead of the number when the title has none, and the series name and number are cut from the title since they are already there). Downloads resume where they stopped after an interruption or a restart, and a failed one is retried at the next check or by clicking its row. For archive.org the h.264 version is preferred over the original and the small derivatives. Nothing is deleted when an episode is watched.
-- **Subtitles:** every subtitle file (`.srt`, `.vtt`, `.ass`) an archive.org item has is saved next to the video with its language, `<name>.en.srt`, and mpv loads them on its own. RSS feeds carry none.
+- **Subtitles:** every subtitle file (`.srt`, `.vtt`, `.ass`) an archive.org item has, and the English subtitles of a YouTube video (not the automatic captions; `ytdlp=--sub-langs en,ro` for others), are saved next to the video with their language, `<name>.en.srt`, and mpv loads them on its own. RSS feeds carry none; a plugin can give any.
 - **The popup:** a **Media** section under the live channels with one row per source: `Source - S01E05 Title - ready - 2 new`. The marker is green when the next episode is on disk, amber while it is queued or downloading (with the percent), red when the download failed (the reason is in the tooltip, which also shows the unwatched count and the last episode watched) and grey when it is not downloaded. Click the row to play the next unwatched episode in the shared mpv window, or to download it first if it is not on disk. New episodes open the popup and play the notification sound, like a channel going live; the section never counts in the tray badge and, like the live channels, does not keep the popup open once it is showing. Downloads update the rows in place.
 - **Watched:** an episode counts as watched when playback reached 90 % of it, or got to its last 20 seconds after at least half; the next one is then downloaded. Where you stopped inside an episode is not remembered. The state (episode lists, what is watched and downloaded) is in `media.json` next to `state.json`.
+
+### Media plugins
+
+A plugin is a Python file in `~/.config/void-tray/media-plugins/` (create the folder) that teaches the Media section a site. It is loaded at the next check after you save it, with no restart, and a plugin that does not load is named on the row of any source that needed it. A plugin runs inside the app with your permissions, like the scripts in `[launcher]`, so only keep files there that you wrote or read.
+
+A `[media]` line reaches a plugin in one of two ways: the plugin's `matches(line)` returns true for it (plugins are asked before the built-in drivers, so one can also take over a site they handle), or the line starts with the plugin's name and a colon, `retrotv:the-show|Retro TV`, and the plugin gets what follows the colon.
+
+```python
+# ~/.config/void-tray/media-plugins/retrotv.py
+from void_tray.media import fetch_json      # get JSON with a timeout; see "Helpers" below
+
+NAME = 'retrotv'     # optional: the name for `retrotv:...` lines (default: the file name)
+ORDER = 'oldest'     # optional: 'oldest' for a series, 'newest' for a podcast (default)
+
+def matches(source):                 # optional: which [media] lines this plugin takes
+    return source.startswith('https://retrotv.example/show/')
+
+def list_episodes(source):           # required: (title, episodes), oldest first
+    show = fetch_json(source.replace('/show/', '/api/show/'))
+    return show['name'], [
+        {'id': e['slug'], 'title': e['title'], 'date': e['aired'],
+         'url': e['video'],                                    # the file to download
+         'subs': [{'url': s['file'], 'lang': s['lang']} for s in e.get('subtitles', [])]}
+        for e in show['episodes']]
+```
+
+That is a complete plugin: the app downloads each `url` (resuming, with the subtitles) and does everything else. An **episode** is a dict with
+
+- `id`: any string or number, unique within the source and stable between checks (it is what "watched" is remembered by);
+- `title`, and `date` as `YYYY-MM-DD` (anything else is ignored). Titles with `S01E05` or `1x05` are ordered by it, otherwise episodes are ordered by date, and episodes the site cannot tell apart stay in the order you listed them, so list them **oldest first**;
+- `url` (and `ext`, `.mp4` by default or taken from the url) for a file to download, and `subs`, a list of `{'url': ..., 'lang': 'en', 'ext': '.srt'}` (`lang` and `ext` optional);
+- anything else you like (a `ref`, a page address), which is kept and handed back to you.
+
+Two more functions are optional. Give episodes no `url` and define **`resolve(episode)`** to look the file up only when it is about to be downloaded (the way archive.org collections work, so that a check does not make a request per episode); it returns `{'video': {'url': ..., 'ext': '.mp4'}, 'subs': [...]}`. Or define **`download(episode, base, progress, cancelled)`** to fetch the files yourself (a command-line downloader, a site that needs a session): save the video as `base` plus its extension and each subtitle as `base.<lang>.<ext>`, call `progress(done_bytes, total_bytes_or_None)` now and then, stop when `cancelled()` is true, and return `{'video': path, 'subs': [paths]}`. This is how the yt-dlp driver, which is built the same way, works.
+
+**Helpers** you can import from `void_tray.media`: `fetch_json(url)` (a GET with a User-Agent and a timeout, returns the parsed JSON), `download_file(url, dest, progress=None, cancelled=None)` (resumable) and `season_episode(title)`. Do your own requests with a timeout: a plugin that hangs stops the checks of every source until it returns. Whatever a plugin raises is shown on its source's row, so `raise ValueError('the site changed its layout')` is a fine way to say what went wrong.
+
+To try a plugin without waiting for a check, run this in a terminal with the line you would put in `[media]`:
+
+```
+cd ~/projects/void-tray-v2 && python3 -c "
+import sys
+from void_tray.constants import MEDIA_PLUGIN_DIR
+from void_tray.mediasources import MediaSources
+sources = MediaSources(MEDIA_PLUGIN_DIR); sources.refresh(); print('not loaded:', sources.errors or 'none')
+driver, given = sources.driver_for(sys.argv[1]); title, episodes = driver.list_episodes(given)
+print(driver.name, '-', title, '-', len(episodes), 'episodes'); [print(e) for e in episodes[:3]]" 'retrotv:the-show'
+```
 
 ### Weather
 
@@ -65,6 +113,7 @@ A minimal tray-based RSS/Atom reader for Linux, built with Python and GTK3 as a 
 - `xbps-install` / `xbps-query` for update detection (Void Linux only)
 - `topgrade` (optional, `sudo xbps-install topgrade`) to install updates with it; see [Passwordless updates](#passwordless-updates-optional)
 - `streamlink` and `mpv` for Twitch and YouTube Live streams; `mpv` also plays the podcasts, series and movies
+- `yt-dlp` for YouTube and other sites in the Media section (`sudo xbps-install yt-dlp`), and `ffmpeg` so that it can join the best video and audio streams (without it yt-dlp takes the best single file)
 - A command-line audio player for the notification sound
 
 ```bash
@@ -154,12 +203,15 @@ channel/UCxxxxxxxxxxxxxxxxxxxxxx|Other Name|720p60
 # interval=<minutes> between checks (default 60, minimum 10)
 # ahead=<n> unwatched episodes kept downloaded per source (default 2; 0 = only on a click)
 # One source per line: url|display name (optional)|order (optional)
-#   url: an archive.org collection or item, or any podcast / video RSS or Atom feed
+#   url: an archive.org collection or item, a YouTube channel / playlist / video, or any
+#        podcast / video RSS or Atom feed; yt-dlp:<url> reads any other site yt-dlp supports
 #   order: oldest (a series, from its first episode; the default for archive.org)
 #          or newest (a podcast, from the latest; the default for feeds)
 path=~/videos
+# ytdlp=-S res:720 --cookies-from-browser firefox   (extra yt-dlp arguments, for every run)
 https://archive.org/details/some-collection|Some Series
 https://example.com/podcast.xml|Some Podcast|newest
+https://www.youtube.com/@SomeChannel/videos|Some Channel
 
 [weather]
 # lat|lon for the weather bar (Open-Meteo, no key needed); the weather

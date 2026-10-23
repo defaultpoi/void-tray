@@ -24,8 +24,6 @@ VIDEO_EXTENSIONS = ('.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.mpg', '.m
 AUDIO_EXTENSIONS = ('.mp3', '.m4a', '.ogg', '.opus', '.flac', '.wav')
 SUBTITLE_EXTENSIONS = ('.srt', '.vtt', '.ass')
 
-DEFAULT_ORDER = {'archive': 'oldest', 'feed': 'newest'}  # a series from the start, a podcast from now
-
 
 class DownloadCancelled(Exception):
     pass
@@ -43,15 +41,6 @@ def archive_identifier(url):
     if len(parts) >= 2 and parts[0] in ('details', 'download', 'metadata'):
         return urllib.parse.unquote(parts[1])
     return None
-
-
-def source_kind(url):
-    return 'archive' if archive_identifier(url) else 'feed'
-
-
-def source_order(url, order):
-    """The configured order, or the kind's default."""
-    return order if order in ('oldest', 'newest') else DEFAULT_ORDER[source_kind(url)]
 
 
 def _first(value):
@@ -105,11 +94,13 @@ def episode_label(episode):
 
 
 def order_episodes(episodes, order):
-    """The watching order: season and episode where titles carry them, then date,
-    then title. 'newest' turns it around."""
+    """The watching order: season and episode where titles carry them, then date;
+    episodes the site gives no way to tell apart stay in the order the driver listed
+    them, which is oldest first. 'newest' turns it all around."""
     def key(e):
-        return (e.get('season') or 0, e.get('episode') or 0, e.get('date') or '', e.get('title') or '')
-    return sorted(episodes, key=key, reverse=(order == 'newest'))
+        return (e.get('season') or 0, e.get('episode') or 0, e.get('date') or '')
+    ordered = sorted(episodes, key=key)  # stable
+    return ordered[::-1] if order == 'newest' else ordered
 
 
 def upcoming(episodes, watched, order, count=1):
@@ -312,18 +303,26 @@ def episode_basename(source_title, episode, names=()):
     return ' - '.join(p for p in parts if p)
 
 
-def episode_paths(root, source_title, episode, files, taken=(), names=()):
-    """Where an episode's files go: {'video': path, 'subs': [path...]}, in a folder
-    named after the source. A name another episode's files already use gets ' (2)'."""
+def episode_basepath(root, source_title, episode, taken=(), names=()):
+    """Where an episode's files go, without the extension: in a folder named after
+    the source. A name another episode's files already use (`taken` are their paths,
+    with or without extension) gets ' (2)'."""
     directory = os.path.join(os.path.expanduser(root), safe_name(source_title))
-    base = episode_basename(source_title, episode, names)
-    video = os.path.join(directory, base + files['video']['ext'])
-    taken = set(taken)
-    number = 2
-    while video in taken:
-        base = f'{episode_basename(source_title, episode, names)} ({number})'
-        video = os.path.join(directory, base + files['video']['ext'])
+    stem = episode_basename(source_title, episode, names)
+    used = {os.path.splitext(p)[0] for p in taken}
+    base, number = os.path.join(directory, stem), 2
+    while base in used:
+        base = os.path.join(directory, f'{stem} ({number})')
         number += 1
+    return base
+
+
+def episode_paths(root, source_title, episode, files, taken=(), names=()):
+    """Where an episode's files go: {'video': path, 'subs': [path...]}."""
+    base = episode_basepath(root, source_title, episode, taken, names)
+    directory = os.path.dirname(base)
+    video = base + files['video']['ext']
+    base = os.path.basename(base)
     subs, used = [], set()
     for sub in files['subs']:
         lang = sub.get('lang') or ''

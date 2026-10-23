@@ -539,7 +539,7 @@ class TestMediaConfig(TmpConfigCase):
     def test_defaults_without_a_section(self):
         self.conf('[feeds]\nhttps://example.com/feed.xml\n')
         self.assertEqual(rt.load_media_settings(),
-                         {'path': os.path.expanduser('~/videos'), 'interval': 3600, 'ahead': 2})
+                         {'path': os.path.expanduser('~/videos'), 'interval': 3600, 'ahead': 2, 'ytdlp': []})
         self.assertEqual(rt.load_media_sources(), [])
 
     def test_defaults_without_a_config_file(self):
@@ -548,7 +548,7 @@ class TestMediaConfig(TmpConfigCase):
 
     def test_settings_are_read_and_the_path_is_expanded(self):
         self.conf('[media]\npath=~/shows\ninterval=30\nahead=4\n')
-        self.assertEqual(rt.load_media_settings(), {'path': os.path.expanduser('~/shows'), 'interval': 1800, 'ahead': 4})
+        self.assertEqual(rt.load_media_settings(), {'path': os.path.expanduser('~/shows'), 'interval': 1800, 'ahead': 4, 'ytdlp': []})
 
     def test_the_interval_has_a_minimum_and_ahead_a_range(self):
         self.conf('[media]\ninterval=1\nahead=500\n')
@@ -583,9 +583,32 @@ class TestMediaConfig(TmpConfigCase):
         self.conf('[media]\nhttps://a.example/x|A|NEWEST\nhttps://b.example/x|B|sideways\n')
         self.assertEqual([s[2] for s in rt.load_media_sources()], ['newest', None])
 
-    def test_duplicates_and_non_urls_are_skipped(self):
-        self.conf('[media]\nhttps://a.example/x|First\nhttps://a.example/x|Second\nnot a url\nftp://a.example/x\n')
+    def test_duplicates_and_lines_that_are_not_sources_are_skipped(self):
+        self.conf('[media]\nhttps://a.example/x|First\nhttps://a.example/x|Second\nnot a url\njust text\nname=value\n')
         self.assertEqual(rt.load_media_sources(), [('https://a.example/x', 'First', None)])
+
+    def test_a_line_for_a_driver_or_plugin_is_a_source_too(self):
+        self.conf('[media]\nyt-dlp:https://vimeo.com/channels/x|Staff Picks|oldest\nmysite:show-1|My Show\n'
+                  'mysite:show-1|again\nftp://a.example/x\n')
+        self.assertEqual(rt.load_media_sources(), [
+            ('yt-dlp:https://vimeo.com/channels/x', 'Staff Picks', 'oldest'),
+            ('mysite:show-1', 'My Show', None),
+            ('ftp://a.example/x', None, None)])  # whether anything handles it is for the check to say
+
+    def test_settings_with_a_colon_in_their_value_are_not_sources(self):
+        self.conf('[media]\npath=/mnt/disk:1/videos\nytdlp=--proxy socks5://127.0.0.1:9050\n')
+        self.assertEqual(rt.load_media_sources(), [])
+
+    def test_extra_ytdlp_arguments_are_split_like_a_shell_would(self):
+        self.conf('[media]\nytdlp=-S res:720 --cookies-from-browser firefox --sub-langs "en,ro"\n')
+        self.assertEqual(rt.load_media_settings()['ytdlp'],
+                         ['-S', 'res:720', '--cookies-from-browser', 'firefox', '--sub-langs', 'en,ro'])
+
+    def test_unusable_ytdlp_arguments_are_none(self):
+        self.conf('[media]\nytdlp=--x "unclosed\n')
+        self.assertEqual(rt.load_media_settings()['ytdlp'], [])
+        self.conf('[media]\nahead=1\n')
+        self.assertEqual(rt.load_media_settings()['ytdlp'], [])
 
     def test_the_template_documents_the_section(self):
         rt.ensure_config()

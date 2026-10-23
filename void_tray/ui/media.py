@@ -10,16 +10,16 @@ from ..config import load_media_settings, load_media_sources
 from ..media import (
     clean_title,
     download_episode,
+    episode_basepath,
     episode_label,
     episode_paths,
-    list_episodes,
     merge_episodes,
     new_unwatched,
     resolve_files,
-    source_order,
     unwatched_count,
     upcoming,
 )
+from ..mediasources import NoDriver, normalize_saved
 from ..network import run_when_online
 from ..playback import counts_as_watched, play_media_file
 from ..state import new_media_entry, save_media
@@ -28,18 +28,22 @@ from ..state import new_media_entry, save_media
 MEDIA_MARKER_COLORS = {'ready': '#2e8b57', 'busy': '#d08000', 'failed': '#c0392b', 'idle': '#808080'}
 
 
-def media_row_view(name, entry, order, downloaded, status):
+def media_row_view(name, entry, order, downloaded, status, error=None):
     """What a source's row shows: (name, next episode text, stats text, tooltip,
     marker colour key). `downloaded` is whether the next episode is on disk and
     `status` its entry in the downloads' progress ('queued', 'downloading' with a
-    percent, or 'failed' with an error), None when nothing is going on."""
+    percent, or 'failed' with an error), None when nothing is going on. `error` is
+    why the source's last check failed, if it did."""
     last = entry.get('last_watched')
     last_line = f"Last watched: {last.get('title') or last['id']}" if last else ''
+    error_line = f'Last check failed: {error}' if error else ''
     news = new_unwatched(entry)
     nxt = upcoming(entry.get('episodes', []), entry.get('watched', []), order, 1)
+    if not entry.get('episodes') and error:
+        return name, 'cannot be read', '', '\n'.join((error, 'Click to try again')), 'failed'
     if not nxt:
         text = 'all watched' if entry.get('episodes') else 'no episodes yet'
-        return name, text, (f'{news} new' if news else ''), last_line, 'idle'
+        return name, text, (f'{news} new' if news else ''), '\n'.join(p for p in (last_line, error_line) if p), 'idle'
     episode = nxt[0]
     label = episode_label(episode)
     text = ' '.join(p for p in (label, clean_title(episode.get('title'), (name, entry.get('title')))) if p)
@@ -56,8 +60,17 @@ def media_row_view(name, entry, order, downloaded, status):
         stats, color, hint = 'not downloaded', 'idle', 'Click to download'
     if news:
         stats = f'{stats} - {news} new' if stats else f'{news} new'
-    tooltip = '\n'.join(p for p in (text, hint, f'{unwatched_count(entry)} unwatched', last_line) if p)
+    tooltip = '\n'.join(p for p in (text, hint, f'{unwatched_count(entry)} unwatched', last_line, error_line) if p)
     return name, text, stats, tooltip, color
+
+
+def describe_media_error(error):
+    """A source's failure as one line for its row: a driver's own message as it is
+    (a ValueError, or no driver), anything else with the kind of error."""
+    message = str(error).strip()
+    if isinstance(error, (NoDriver, ValueError)) and message:
+        return message[:300]
+    return f'{error.__class__.__name__}: {message}'[:300].rstrip(': ')
 
 
 class MediaMixin:
@@ -88,15 +101,20 @@ class MediaMixin:
         """Reads every configured source, remembers what is new, then queues the
         downloads. A source that cannot be read keeps what is known of it."""
         new_total = 0
-        for url, _name, order in load_media_sources():
+        self.media_registry.refresh()  # picks up plugins that were added or edited
+        for url, _name, configured in load_media_sources():
             try:
-                title, episodes = list_episodes(url)
-            except Exception:  # network, bad JSON or feed: try again at the next check
-                self.note_request_failure()
+                driver, target = self.media_registry.driver_for(url)
+                title, episodes = driver.list_episodes(target)
+            except Exception as error:  # network, bad JSON or feed, a plugin's bug: try again at the next check
+                self.media_errors[url] = describe_media_error(error)
+                if not isinstance(error, (NoDriver, ValueError)):
+                    self.note_request_failure()
                 continue
+            self.media_errors.pop(url, None)
             with self._media_data_lock:
                 entry = self.media['sources'].setdefault(url, new_media_entry())
-                new_total += len(merge_episodes(entry, title, episodes, source_order(url, order)))
+                new_total += len(merge_episodes(entry, title, episodes, configured or driver.order))
                 save_media(self.media)
         GLib.idle_add(self._on_media_new if new_total else self._refresh_media_rows)
         self._plan_media_downloads()
@@ -124,7 +142,7 @@ class MediaMixin:
                 for url, _name, order in load_media_sources():
                     entry = self.media['sources'].get(url)
                     if entry:
-                        for episode in upcoming(entry['episodes'], entry['watched'], source_order(url, order), ahead):
+                        for episode in upcoming(entry['episodes'], entry['watched'], self._effective_order(url, order), ahead):
                             if not self._media_file_ready(entry, episode['id']):
                                 wanted.append((url, episode['id']))
         self._enqueue_media(wanted)
@@ -180,11 +198,17 @@ class MediaMixin:
                 GLib.idle_add(self._refresh_media_rows)
 
         try:
-            files = resolve_files(episode)
-            paths = episode_paths(load_media_settings()['path'], name, episode, files, taken, names=(entry.get('title'),))
-            saved = download_episode(paths, files, progress=progress)
+            driver = self.media_registry.driver_of(episode)
+            root, names = load_media_settings()['path'], (entry.get('title'),)
+            if driver.download:  # the driver fetches the files itself (yt-dlp, a plugin)
+                base = episode_basepath(root, name, episode, taken, names=names)
+                saved = normalize_saved(driver.download(episode, base, progress, lambda: False))
+            else:
+                files = driver.resolve(episode) if driver.resolve else resolve_files(episode)
+                paths = episode_paths(root, name, episode, files, taken, names=names)
+                saved = download_episode(paths, files, progress=progress)
         except Exception as error:  # the partial file stays, so the next try carries on
-            self.media_status[key] = {'state': 'failed', 'error': str(error) or error.__class__.__name__}
+            self.media_status[key] = {'state': 'failed', 'error': describe_media_error(error)}
             GLib.idle_add(self._refresh_media_rows)
             return
         with self._media_data_lock:
@@ -195,8 +219,17 @@ class MediaMixin:
 
     # ---- playing and remembering ---------------------------------------------
 
+    def _effective_order(self, url, configured):
+        """The configured order, else the default of the driver that handles the source."""
+        if configured in ('oldest', 'newest'):
+            return configured
+        try:
+            return self.media_registry.driver_for(url)[0].order
+        except NoDriver:
+            return 'newest'
+
     def _media_source_order(self, url):
-        return next((source_order(u, o) for u, _n, o in load_media_sources() if u == url), source_order(url, None))
+        return self._effective_order(url, next((o for u, _n, o in load_media_sources() if u == url), None))
 
     def on_media_row_clicked(self, url):
         """Plays a source's next unwatched episode, or starts downloading it first."""
@@ -205,6 +238,9 @@ class MediaMixin:
             entry = self.media['sources'].get(url)
             nxt = upcoming(entry['episodes'], entry['watched'], order, 1) if entry else []
             if not nxt:
+                retry = not (entry and entry['episodes']) and url in self.media_errors
+                if retry:
+                    self.start_media_check()  # an unreadable source: try it again now
                 return
             episode = nxt[0]
             ready = self._media_file_ready(entry, episode['id'])
@@ -244,9 +280,11 @@ class MediaMixin:
     # ---- the popup's rows ----------------------------------------------------
 
     def media_source_urls(self):
-        """The configured sources that have been read at least once, in config order."""
+        """The configured sources that have been read at least once, or that could not
+        be, in config order."""
         with self._media_data_lock:
-            return [url for url, _n, _o in load_media_sources() if self.media['sources'].get(url, {}).get('episodes')]
+            return [url for url, _n, _o in load_media_sources()
+                    if self.media['sources'].get(url, {}).get('episodes') or url in self.media_errors]
 
     def build_media_row(self, url):
         row = Gtk.ListBoxRow()
@@ -276,14 +314,17 @@ class MediaMixin:
         url = row.media_source
         with self._media_data_lock:
             entry = self.media['sources'].get(url)
-            if not entry:
+            error = self.media_errors.get(url)
+            if not entry and not error:
                 return
+            entry = entry or new_media_entry()  # a source that has never been read, only failed
             name, order = configured.get(url, (None, None))
-            order = source_order(url, order)
+            order = self._effective_order(url, order)
             nxt = upcoming(entry['episodes'], entry['watched'], order, 1)
             ready = bool(nxt) and self._media_file_ready(entry, nxt[0]['id'])
             status = self.media_status.get((url, nxt[0]['id'])) if nxt else None
-            name, text, stats, tooltip, color = media_row_view(name or entry.get('title') or url, entry, order, ready, status)
+            name, text, stats, tooltip, color = media_row_view(
+                name or entry.get('title') or url, entry, order, ready, status, error)
         escape = GLib.markup_escape_text
         row.media_marker.set_markup(f'<span foreground="{MEDIA_MARKER_COLORS[color]}">\u25cf</span>')
         row.media_label.set_markup(f'<span foreground="#000000"><b>{escape(name)}</b> - {escape(text)}</span>')

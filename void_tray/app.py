@@ -13,11 +13,12 @@ from .config import (
     load_youtube_check_interval,
     migrate_legacy_config,
 )
-from .constants import DEFAULT_HIGHLIGHT_WORDS
+from .constants import DEFAULT_HIGHLIGHT_WORDS, MEDIA_PLUGIN_DIR
 from .state import load_media, load_state
 from .ui.connectivity import ConnectivityMixin
 from .ui.feeds import FeedsMixin
 from .ui.icon import IconMixin
+from .mediasources import MediaSources
 from .ui.live import LiveMixin
 from .ui.media import MediaMixin
 from .ui.popup import PopupMixin, WINDOW_WIDTH
@@ -37,6 +38,8 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, MediaMixin, P
         self._youtube_lock = threading.Lock()  # guards overlapping YouTube-check cycles
         self.media = load_media()  # podcasts, series and movies (media.json)
         self.media_status = {}  # (source url, episode id) -> download progress, in memory only
+        self.media_errors = {}  # source -> why its last check failed, in memory only
+        self.media_registry = MediaSources(MEDIA_PLUGIN_DIR)  # built-in drivers and the plugins
         self._media_check_lock = threading.Lock()  # guards overlapping media-check cycles
         self._media_data_lock = threading.Lock()  # guards self.media
         self._media_queue_lock = threading.Lock()  # guards the download queue below

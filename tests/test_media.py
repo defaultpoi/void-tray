@@ -93,14 +93,6 @@ class TestSources(unittest.TestCase):
         with mock.patch.object(rt, 'ARCHIVE_BASE', 'http://127.0.0.1:9999'):
             self.assertEqual(rt.archive_identifier('http://127.0.0.1:9999/details/x'), 'x')
 
-    def test_kind_and_default_order(self):
-        self.assertEqual(rt.source_kind('https://archive.org/details/x'), 'archive')
-        self.assertEqual(rt.source_kind('https://example.com/feed.xml'), 'feed')
-        self.assertEqual(rt.source_order('https://archive.org/details/x', None), 'oldest')
-        self.assertEqual(rt.source_order('https://example.com/feed.xml', None), 'newest')
-        self.assertEqual(rt.source_order('https://example.com/feed.xml', 'oldest'), 'oldest')
-        self.assertEqual(rt.source_order('https://archive.org/details/x', 'sideways'), 'oldest')
-
 
 class TestTitlesAndOrder(unittest.TestCase):
     def test_season_and_episode_come_from_the_title(self):
@@ -143,6 +135,16 @@ class TestTitlesAndOrder(unittest.TestCase):
 
     def test_newest_first_turns_it_around(self):
         self.assertEqual([e['id'] for e in rt.order_episodes(self.episodes(), 'newest')], ['c', 'b', 'a'])
+
+    def test_episodes_without_dates_keep_the_drivers_oldest_first_order_either_way(self):
+        eps = [{'id': i, 'title': 'same', 'date': ''} for i in 'abc']
+        self.assertEqual([e['id'] for e in rt.order_episodes(eps, 'oldest')], ['a', 'b', 'c'])
+        self.assertEqual([e['id'] for e in rt.order_episodes(eps, 'newest')], ['c', 'b', 'a'])
+
+    def test_dates_beat_the_list_order_and_ties_follow_it(self):
+        eps = [{'id': 'x', 'date': '2020-01-02'}, {'id': 'y', 'date': '2020-01-01'}, {'id': 'z', 'date': '2020-01-02'}]
+        self.assertEqual([e['id'] for e in rt.order_episodes(eps, 'oldest')], ['y', 'x', 'z'])
+        self.assertEqual([e['id'] for e in rt.order_episodes(eps, 'newest')], ['z', 'x', 'y'])
 
     def test_numbers_beat_dates(self):
         eps = [{'id': 'x2', 'title': 'x', 'date': '2000-01-01', 'season': 1, 'episode': 2},
@@ -447,6 +449,13 @@ class TestFilenames(unittest.TestCase):
         subs = [{'url': 'a', 'ext': '.srt', 'lang': 'en'}, {'url': 'b', 'ext': '.srt', 'lang': 'en'}]
         paths = rt.episode_paths('/v', 'S', {'title': 'T'}, self.files(subs))
         self.assertEqual(len(set(paths['subs'])), 2)
+
+    def test_the_base_path_is_the_video_path_without_its_extension(self):
+        self.assertEqual(rt.episode_basepath('/v', 'S', {'title': 'T'}), '/v/S/S - T')
+
+    def test_the_base_path_avoids_taken_names_whatever_their_extension(self):
+        self.assertEqual(rt.episode_basepath('/v', 'S', {'title': 'T'}, taken={'/v/S/S - T.mkv'}), '/v/S/S - T (2)')
+        self.assertEqual(rt.episode_basepath('/v', 'S', {'title': 'T'}, taken={'/v/S/S - T.mkv', '/v/S/S - T (2)'}), '/v/S/S - T (3)')
 
     def test_a_name_another_episode_uses_gets_a_number(self):
         taken = {'/v/S/S - T.mp4', '/v/S/S - T (2).mp4'}

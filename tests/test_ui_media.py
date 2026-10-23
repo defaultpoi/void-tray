@@ -24,7 +24,46 @@ def entry_with(*episodes, watched=(), new=(), files=None, title='Show', last=Non
     return entry
 
 
+class FakeDriver:
+    """What the registry hands the mixin: a name, a default order, listing, and the
+    optional resolve and download."""
+
+    def __init__(self, name, order, download=None, resolve=None):
+        self.name, self.order, self.download, self.resolve = name, order, download, resolve
+        self.list_episodes = mock.Mock(return_value=(name, []))
+
+
+class FakeRegistry:
+    def __init__(self):
+        self.by_source = {URL: FakeDriver('archive', 'oldest'), POD: FakeDriver('feed', 'newest')}
+        self.by_episode_name = {}
+        self.refreshed = 0
+
+    def refresh(self):
+        self.refreshed += 1
+
+    def listing(self, source, result):
+        driver = self.by_source[source]
+        if isinstance(result, Exception):
+            driver.list_episodes = mock.Mock(side_effect=result)
+        else:
+            driver.list_episodes = mock.Mock(return_value=result)
+
+    def driver_for(self, source):
+        if source not in self.by_source:
+            raise rt.NoDriver(f'no source handler for {source}')
+        return self.by_source[source], source
+
+    def driver_of(self, episode):
+        name = episode.get('driver') or ('archive' if str(episode.get('kind', '')).startswith('archive') else 'feed')
+        for driver in self.by_source.values():
+            if driver.name == name:
+                return driver
+        raise rt.NoDriver(f'the {name} source plugin is not loaded')
+
+
 class Stub:
+    _effective_order = rt.RssTray._effective_order
     _check_media_guarded = rt.RssTray._check_media_guarded
     start_media_check = rt.RssTray.start_media_check
     _check_media = rt.RssTray._check_media
@@ -47,6 +86,8 @@ class Stub:
     def __init__(self):
         self.media = {'sources': {}}
         self.media_status = {}
+        self.media_errors = {}
+        self.media_registry = FakeRegistry()
         self._media_check_lock = threading.Lock()
         self._media_data_lock = threading.Lock()
         self._media_queue_lock = threading.Lock()
@@ -159,6 +200,21 @@ class TestMediaRowView(unittest.TestCase):
     def test_a_source_with_no_episodes(self):
         self.assertEqual(self.view(entry_with())[1:3], ('no episodes yet', ''))
 
+    def test_a_source_that_cannot_be_read_shows_why_and_offers_a_retry(self):
+        name, text, stats, tooltip, color = rt.media_row_view('Show', entry_with(), 'oldest', False, None, 'yt-dlp is not installed')
+        self.assertEqual((text, stats, color), ('cannot be read', '', 'failed'))
+        self.assertEqual(tooltip.split('\n'), ['yt-dlp is not installed', 'Click to try again'])
+
+    def test_a_source_with_episodes_that_failed_its_last_check_keeps_its_row_and_notes_it(self):
+        entry = entry_with(ep('a', 1))
+        _, text, stats, tooltip, color = rt.media_row_view('Show', entry, 'oldest', True, None, 'OSError: offline')
+        self.assertEqual((text, stats, color), ('S01E01 a', 'ready', 'ready'))
+        self.assertIn('Last check failed: OSError: offline', tooltip)
+
+    def test_the_error_is_in_the_tooltip_when_everything_is_watched_too(self):
+        entry = entry_with(ep('a', 1), watched=['a'])
+        self.assertEqual(rt.media_row_view('Show', entry, 'oldest', False, None, 'x')[3], 'Last check failed: x')
+
     def test_the_tooltip_has_the_episode_the_hint_the_count_and_the_last_watched(self):
         entry = entry_with(ep('a', 1), ep('b', 2), ep('c', 3), watched=['a'], last={'id': 'a', 'title': 'A title'})
         tooltip = self.view(entry, downloaded=True)[3]
@@ -170,41 +226,48 @@ class TestMediaRowView(unittest.TestCase):
 
 
 class TestChecking(MediaCase):
+    def check(self, stub, **listings):
+        """Runs a check with the listings given as {source url: result} on the fake drivers."""
+        for source, result in listings.items():
+            stub.media_registry.listing(source, result)
+        stub._check_media()
+
     def test_the_first_check_sets_the_baseline_and_announces_nothing(self):
         stub = Stub()
         stub._plan_media_downloads = mock.Mock()
-        with mock.patch.object(rt, 'list_episodes', return_value=('Show', [ep('a', 1), ep('b', 2)])):
-            stub._check_media()
+        stub.media_registry.listing(URL, ('Show', [ep('a', 1), ep('b', 2)]))
+        stub._check_media()
         entry = stub.media['sources'][URL]
         self.assertTrue(entry['baselined'])
-        self.assertEqual(entry['watched'], [])  # an archive.org source is a series: from the start
+        self.assertEqual(entry['watched'], [])  # the archive driver's default is a series: from the start
         self.assertEqual(self.queued(stub, '_on_media_new'), [])
         self.assertEqual(len(self.queued(stub, '_refresh_media_rows')), 1)
         stub._plan_media_downloads.assert_called_once_with()
         self.save_media.assert_called_with(stub.media)
+        self.assertEqual(stub.media_registry.refreshed, 1)  # plugins are looked at before every check
 
     def test_a_feed_is_a_podcast_and_starts_at_its_latest(self):
         self.sources = [(POD, 'Pod', None)]
         stub = Stub()
         stub._plan_media_downloads = mock.Mock()
-        with mock.patch.object(rt, 'list_episodes', return_value=('Pod', [ep('a', 1), ep('b', 2), ep('c', 3)])):
-            stub._check_media()
+        stub.media_registry.listing(POD, ('Pod', [ep('a', 1), ep('b', 2), ep('c', 3)]))
+        stub._check_media()
         self.assertEqual(sorted(stub.media['sources'][POD]['watched']), ['a', 'b'])
 
-    def test_the_configured_order_wins(self):
+    def test_the_configured_order_wins_over_the_drivers(self):
         self.sources = [(POD, 'Pod', 'oldest')]
         stub = Stub()
         stub._plan_media_downloads = mock.Mock()
-        with mock.patch.object(rt, 'list_episodes', return_value=('Pod', [ep('a', 1), ep('b', 2)])):
-            stub._check_media()
+        stub.media_registry.listing(POD, ('Pod', [ep('a', 1), ep('b', 2)]))
+        stub._check_media()
         self.assertEqual(stub.media['sources'][POD]['watched'], [])
 
     def test_a_new_episode_is_announced(self):
         stub = Stub()
         stub._plan_media_downloads = mock.Mock()
         stub.media['sources'][URL] = entry_with(ep('a', 1))
-        with mock.patch.object(rt, 'list_episodes', return_value=('Show', [ep('a', 1), ep('b', 2)])):
-            stub._check_media()
+        stub.media_registry.listing(URL, ('Show', [ep('a', 1), ep('b', 2)]))
+        stub._check_media()
         self.assertEqual(len(self.queued(stub, '_on_media_new')), 1)
         self.assertEqual(stub.media['sources'][URL]['new'], ['b'])
 
@@ -214,22 +277,54 @@ class TestChecking(MediaCase):
         stub._plan_media_downloads = mock.Mock()
         old = entry_with(ep('a', 1))
         stub.media['sources'][URL] = old
-        results = [OSError('offline'), ('Pod', [ep('p', 1)])]
-        with mock.patch.object(rt, 'list_episodes', side_effect=results):
-            stub._check_media()
-        stub.note_request_failure.assert_called_once_with()
+        stub.media_registry.listing(URL, OSError('offline'))
+        stub.media_registry.listing(POD, ('Pod', [ep('p', 1)]))
+        stub._check_media()
+        stub.note_request_failure.assert_called_once_with()  # a network error may mean the connection is down
         self.assertIs(stub.media['sources'][URL], old)
         self.assertEqual(old['episodes'], [ep('a', 1)])
         self.assertIn(POD, stub.media['sources'])
+        self.assertEqual(stub.media_errors, {URL: 'OSError: offline'})
         stub._plan_media_downloads.assert_called_once_with()
+
+    def test_a_drivers_own_complaint_is_shown_as_it_is_and_is_not_a_network_failure(self):
+        stub = Stub()
+        stub._plan_media_downloads = mock.Mock()
+        stub.media_registry.listing(URL, ValueError('yt-dlp is not installed (sudo xbps-install yt-dlp)'))
+        stub._check_media()
+        self.assertEqual(stub.media_errors, {URL: 'yt-dlp is not installed (sudo xbps-install yt-dlp)'})
+        stub.note_request_failure.assert_not_called()
+
+    def test_a_bug_in_a_plugin_is_shown_with_its_kind(self):
+        stub = Stub()
+        stub._plan_media_downloads = mock.Mock()
+        stub.media_registry.listing(URL, KeyError('episodes'))
+        stub._check_media()
+        self.assertEqual(stub.media_errors[URL], "KeyError: 'episodes'")
+
+    def test_a_source_nobody_handles_says_so(self):
+        self.sources = [('ftp://example.com/x', None, None)]
+        stub = Stub()
+        stub._plan_media_downloads = mock.Mock()
+        stub._check_media()
+        self.assertEqual(stub.media_errors, {'ftp://example.com/x': 'no source handler for ftp://example.com/x'})
+        stub.note_request_failure.assert_not_called()
+
+    def test_a_source_that_reads_again_loses_its_error(self):
+        stub = Stub()
+        stub._plan_media_downloads = mock.Mock()
+        stub.media_errors[URL] = 'old problem'
+        stub.media_registry.listing(URL, ('Show', [ep('a', 1)]))
+        stub._check_media()
+        self.assertNotIn(URL, stub.media_errors)
 
     def test_removed_sources_are_not_read(self):
         self.sources = []
         stub = Stub()
         stub._plan_media_downloads = mock.Mock()
-        with mock.patch.object(rt, 'list_episodes') as read:
-            stub._check_media()
-        read.assert_not_called()
+        stub._check_media()
+        for driver in stub.media_registry.by_source.values():
+            driver.list_episodes.assert_not_called()
 
     def test_overlapping_checks_are_skipped(self):
         stub = Stub()
@@ -272,6 +367,22 @@ class TestChecking(MediaCase):
         stub.on_new_items.assert_not_called()
 
 
+class TestDescribeError(unittest.TestCase):
+    def test_a_message_from_a_driver_is_kept(self):
+        self.assertEqual(rt.describe_media_error(ValueError('could not read x')), 'could not read x')
+        self.assertEqual(rt.describe_media_error(rt.NoDriver('no source handler for y')), 'no source handler for y')
+
+    def test_other_errors_name_their_kind(self):
+        self.assertEqual(rt.describe_media_error(OSError('boom')), 'OSError: boom')
+        self.assertEqual(rt.describe_media_error(TimeoutError()), 'TimeoutError')
+
+    def test_an_empty_value_error_still_says_something(self):
+        self.assertEqual(rt.describe_media_error(ValueError()), 'ValueError')
+
+    def test_long_messages_are_cut(self):
+        self.assertEqual(len(rt.describe_media_error(ValueError('x' * 1000))), 300)
+
+
 class TestPeriodicCheck(MediaCase):
     def test_it_checks_and_rearms_with_the_interval_now_in_the_config(self):
         stub = Stub()
@@ -294,6 +405,28 @@ class TestPeriodicCheck(MediaCase):
 def stub_periodic(stub):
     stub.periodic_media_check = rt.RssTray.periodic_media_check.__get__(stub)
     return stub.periodic_media_check()
+
+
+class TestEffectiveOrder(MediaCase):
+    def test_the_configured_order_wins(self):
+        stub = Stub()
+        self.assertEqual(stub._effective_order(URL, 'newest'), 'newest')
+        self.assertEqual(stub._effective_order(POD, 'oldest'), 'oldest')
+
+    def test_otherwise_the_drivers_default_applies(self):
+        stub = Stub()
+        self.assertEqual(stub._effective_order(URL, None), 'oldest')
+        self.assertEqual(stub._effective_order(POD, None), 'newest')
+        self.assertEqual(stub._effective_order(URL, 'sideways'), 'oldest')
+
+    def test_a_source_nobody_handles_is_read_as_a_podcast(self):
+        self.assertEqual(Stub()._effective_order('ftp://x', None), 'newest')
+
+    def test_the_source_order_looks_up_the_configured_one(self):
+        self.sources = [(URL, None, 'newest'), (POD, None, None)]
+        stub = Stub()
+        self.assertEqual(stub._media_source_order(URL), 'newest')
+        self.assertEqual(stub._media_source_order(POD), 'newest')
 
 
 class TestPlanning(MediaCase):
@@ -479,12 +612,81 @@ class TestDownloading(MediaCase):
             stub._download_media_episode(URL, 'a')
         self.assertEqual(paths.call_args.args[4], set())
 
+    def driver_stub(self, download=None, resolve=None, **kwargs):
+        stub = self.stub(dict(ep('a', 1, title='Show S01E01 Pilot'), driver='archive'), **kwargs)  # listed by the URL's driver
+        driver = stub.media_registry.by_source[URL]
+        driver.download, driver.resolve = download, resolve
+        return stub, driver
+
+    def test_a_driver_that_downloads_itself_gets_the_base_path_and_the_progress_callback(self):
+        saved = self.touch('video.mkv')
+        sub = self.touch('video.en.vtt')
+        calls = []
+
+        def download(episode, base, progress, cancelled):
+            calls.append((episode['id'], base, cancelled()))
+            progress(50, 100)
+            return {'video': saved, 'subs': [sub, os.path.join(self.dir, 'missing.srt')]}
+        stub, _driver = self.driver_stub(download=download)
+        with mock.patch.object(rt, 'download_episode') as standard, mock.patch.object(rt, 'resolve_files') as resolve:
+            stub._download_media_episode(URL, 'a')
+        self.assertEqual(calls, [('a', os.path.join(self.dir, 'Show', 'Show - S01E01 - Pilot'), False)])
+        standard.assert_not_called()
+        resolve.assert_not_called()
+        self.assertEqual(stub.media['sources'][URL]['files']['a'], {'video': saved, 'subs': [sub]})  # only files that exist
+        self.assertNotIn((URL, 'a'), stub.media_status)
+
+    def test_the_base_path_avoids_names_other_episodes_use(self):
+        saved = self.touch('video.mkv')
+        seen = []
+        stub, _driver = self.driver_stub(download=lambda e, base, p, c: seen.append(base) or {'video': saved, 'subs': []})
+        stub.media['sources'][URL]['files']['other'] = {'video': os.path.join(self.dir, 'Show', 'Show - S01E01 - Pilot.mkv'), 'subs': []}
+        stub._download_media_episode(URL, 'a')
+        self.assertEqual(seen, [os.path.join(self.dir, 'Show', 'Show - S01E01 - Pilot (2)')])
+
+    def test_a_driver_that_claims_a_download_it_did_not_make_fails_the_episode(self):
+        stub, _driver = self.driver_stub(download=lambda e, base, p, c: {'video': os.path.join(self.dir, 'nothing.mkv'), 'subs': []})
+        stub._download_media_episode(URL, 'a')
+        self.assertEqual(stub.media_status[(URL, 'a')]['state'], 'failed')
+        self.assertIn('did not leave the video file', stub.media_status[(URL, 'a')]['error'])
+        self.assertEqual(stub.media['sources'][URL]['files'], {})
+
+    def test_a_driver_that_returns_nonsense_fails_the_episode(self):
+        for result in (None, 'path', {}, {'video': 5}):
+            stub, _driver = self.driver_stub(download=lambda e, base, p, c, r=result: r)
+            stub._download_media_episode(URL, 'a')
+            self.assertEqual(stub.media_status[(URL, 'a')]['state'], 'failed', result)
+
+    def test_an_error_in_a_drivers_download_is_shown_with_its_kind(self):
+        def download(episode, base, progress, cancelled):
+            raise ValueError('yt-dlp: Video unavailable')
+        stub, _driver = self.driver_stub(download=download)
+        stub._download_media_episode(URL, 'a')
+        self.assertEqual(stub.media_status[(URL, 'a')], {'state': 'failed', 'error': 'yt-dlp: Video unavailable'})
+
+    def test_a_drivers_own_resolve_replaces_the_standard_lookup(self):
+        files = {'video': {'url': 'http://h/a.mp4', 'ext': '.mp4'}, 'subs': []}
+        resolved = mock.Mock(return_value=files)
+        stub, _driver = self.driver_stub(resolve=resolved)
+        with mock.patch.object(rt, 'resolve_files') as standard, \
+                mock.patch.object(rt, 'download_episode', return_value={'video': 'v', 'subs': []}) as fetch:
+            stub._download_media_episode(URL, 'a')
+        resolved.assert_called_once()
+        standard.assert_not_called()
+        self.assertIs(fetch.call_args.args[1], files)
+
+    def test_an_episode_whose_driver_is_gone_fails_with_the_reason(self):
+        stub = self.stub(dict(ep('a', 1), driver='gone-plugin'))
+        stub._download_media_episode(URL, 'a')
+        self.assertEqual(stub.media_status[(URL, 'a')]['state'], 'failed')
+        self.assertIn('gone-plugin source plugin is not loaded', stub.media_status[(URL, 'a')]['error'])
+
     def test_a_failure_is_shown_and_nothing_is_recorded(self):
         stub = self.stub(ep('a', 1))
         with mock.patch.object(rt, 'resolve_files', return_value=self.files()), \
                 mock.patch.object(rt, 'download_episode', side_effect=OSError('connection reset')):
             stub._download_media_episode(URL, 'a')
-        self.assertEqual(stub.media_status[(URL, 'a')], {'state': 'failed', 'error': 'connection reset'})
+        self.assertEqual(stub.media_status[(URL, 'a')], {'state': 'failed', 'error': 'OSError: connection reset'})
         self.assertEqual(stub.media['sources'][URL]['files'], {})
         self.save_media.assert_not_called()
 
@@ -685,6 +887,44 @@ class TestRows(MediaCase):
         stub.media['sources']['https://c.example/x'] = entry_with()  # read, but nothing in it yet
         stub.media['sources']['https://removed.example/'] = entry_with(ep('a', 1))
         self.assertEqual(stub.media_source_urls(), [URL, POD])  # config order, no removed sources, no empty ones
+
+    def test_a_source_that_could_not_be_read_is_listed_too(self):
+        self.sources = [(URL, None, None), (POD, None, None)]
+        stub = Stub()
+        stub.media_errors[POD] = 'no source handler for x'
+        self.assertEqual(stub.media_source_urls(), [POD])
+
+    def test_a_row_for_a_source_that_never_read_shows_its_error(self):
+        stub = Stub()
+        stub.media_errors[URL] = 'yt-dlp is not installed'
+        row = self.row()
+        stub._update_media_row(row, {URL: ('My Show', None)})
+        self.assertEqual(row.media_label.set_markup.call_args.args[0],
+                         '<span foreground="#000000"><b>My Show</b> - cannot be read</span>')
+        self.assertIn('#c0392b', row.media_marker.set_markup.call_args.args[0])
+        self.assertIn('yt-dlp is not installed', row.set_tooltip_text.call_args.args[0])
+        self.assertNotIn(URL, stub.media['sources'])  # showing it creates no state
+
+    def test_a_row_for_a_source_with_neither_state_nor_error_is_left_alone(self):
+        stub = Stub()
+        row = self.row()
+        stub._update_media_row(row, {})
+        row.media_label.set_markup.assert_not_called()
+
+    def test_clicking_an_unreadable_source_checks_it_again(self):
+        stub = Stub()
+        stub.media_errors[URL] = 'OSError: offline'
+        stub.start_media_check = mock.Mock()
+        stub.on_media_row_clicked(URL)
+        stub.start_media_check.assert_called_once_with()
+
+    def test_clicking_a_source_that_just_has_nothing_to_watch_does_not_recheck(self):
+        stub = Stub()
+        stub.media['sources'][URL] = entry_with(ep('a', 1), watched=['a'])
+        stub.media_errors[URL] = 'OSError: offline'  # but it has episodes, so no retry from the click
+        stub.start_media_check = mock.Mock()
+        stub.on_media_row_clicked(URL)
+        stub.start_media_check.assert_not_called()
 
     def test_a_row_shows_the_name_the_episode_and_the_stats(self):
         path = self.touch('a.mp4')

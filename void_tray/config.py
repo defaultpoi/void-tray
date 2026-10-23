@@ -2,6 +2,7 @@
 
 import os
 import re
+import shlex
 import shutil
 
 from .constants import CONFIG_DIR, CONFIG_FILE, DEFAULT_HIGHLIGHT_WORDS, LEGACY_CONFIG_DIR
@@ -112,9 +113,12 @@ def ensure_config():
             "# interval=<minutes> between checks (default 60, minimum 10)\n"
             "# ahead=<n> unwatched episodes kept downloaded per source (default 2; 0 downloads\n"
             "# only when you click)\n"
+            "# ytdlp=<arguments> added to every yt-dlp run, e.g. -S res:720 --cookies-from-browser firefox\n"
             "# One source per line: url|display name (optional)|order (optional)\n"
-            "#   url: an archive.org collection or item (https://archive.org/details/...)\n"
-            "#        or any podcast / video RSS or Atom feed\n"
+            "#   url: an archive.org collection or item (https://archive.org/details/...),\n"
+            "#        a YouTube channel, playlist or video, or any podcast / video RSS or Atom feed.\n"
+            "#        yt-dlp:<url> reads any other site yt-dlp supports, and a plugin in\n"
+            "#        ~/.config/void-tray/media-plugins can add more (see the README)\n"
             "#   order: oldest (a series, from its first episode; the default for archive.org)\n"
             "#          or newest (a podcast, from the latest; the default for feeds)\n"
             "# https://archive.org/details/some-collection|Some Series\n"
@@ -603,7 +607,8 @@ DEFAULT_MEDIA_CHECK_MINUTES = 60
 MIN_MEDIA_CHECK_MINUTES = 10
 DEFAULT_MEDIA_AHEAD = 2
 MAX_MEDIA_AHEAD = 20
-_MEDIA_SETTINGS = ('path', 'interval', 'ahead')
+_MEDIA_SETTINGS = ('path', 'interval', 'ahead', 'ytdlp')
+_MEDIA_SOURCE_RE = re.compile(r'[A-Za-z][A-Za-z0-9+.\-_]*:\S')  # https://..., yt-dlp:https://..., mysite:show-1
 
 
 def _media_setting(name):
@@ -615,8 +620,8 @@ def _media_setting(name):
 
 
 def load_media_settings():
-    """{'path', 'interval' (seconds), 'ahead'} from [media], defaults for anything
-    missing or unusable."""
+    """{'path', 'interval' (seconds), 'ahead', 'ytdlp' (extra yt-dlp arguments, a
+    list)} from [media], defaults for anything missing or unusable."""
     path = _media_setting('path') or DEFAULT_MEDIA_PATH
     try:
         minutes = max(MIN_MEDIA_CHECK_MINUTES, int(_media_setting('interval')))
@@ -626,13 +631,17 @@ def load_media_settings():
         ahead = min(MAX_MEDIA_AHEAD, max(0, int(_media_setting('ahead'))))
     except (TypeError, ValueError):
         ahead = DEFAULT_MEDIA_AHEAD
-    return {'path': os.path.expanduser(path), 'interval': minutes * 60, 'ahead': ahead}
+    try:
+        ytdlp = shlex.split(_media_setting('ytdlp') or '')
+    except ValueError:  # an unclosed quote
+        ytdlp = []
+    return {'path': os.path.expanduser(path), 'interval': minutes * 60, 'ahead': ahead, 'ytdlp': ytdlp}
 
 
 def load_media_sources():
-    """[(url, display name or None, order or None)] from [media], de-duplicated
-    by URL (first line wins). Lines that are not http(s) URLs, and the path,
-    interval and ahead settings, are not sources."""
+    """[(source, display name or None, order or None)] from [media], de-duplicated
+    (first line wins). A source is an http(s) URL or a `name:...` line for a driver
+    or plugin; the settings and anything that does not start like that are not."""
     sources, seen = [], set()
     for line in _read_config_sections()['media']:
         key, sep, _val = line.partition('=')
@@ -640,7 +649,7 @@ def load_media_sources():
             continue
         parts = [p.strip() for p in line.split('|', 2)]
         url = parts[0]
-        if not url.lower().startswith(('http://', 'https://')) or url in seen:
+        if not _MEDIA_SOURCE_RE.match(url) or url in seen:
             continue
         seen.add(url)
         name = parts[1] if len(parts) > 1 and parts[1] else None
