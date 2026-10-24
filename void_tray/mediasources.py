@@ -18,6 +18,7 @@ import types
 import urllib.parse
 
 from .config import load_media_settings
+from .hls import DEFAULT_EXTENSION, FORMATS, is_hls
 from .log import _log
 from .media import archive_identifier, list_archive, list_feed
 from .ytdlp import download_ytdlp, is_youtube_url, list_ytdlp
@@ -77,14 +78,45 @@ def _extension(url, fallback='.mp4'):
     return extension if re.fullmatch(r'\.[a-z0-9]{1,5}', extension) else fallback
 
 
+def _clean_headers(headers):
+    """The request headers a driver asked for, as {str: str}; anything else is dropped."""
+    if not isinstance(headers, dict):
+        return {}
+    return {k: v for k, v in headers.items() if isinstance(k, str) and isinstance(v, str) and k and '\n' not in k + v}
+
+
 def _clean_subs(subs):
     clean = []
     for sub in subs if isinstance(subs, list) else []:
         if isinstance(sub, dict) and isinstance(sub.get('url'), str) and sub['url']:
             ext = sub.get('ext') if isinstance(sub.get('ext'), str) and sub['ext'].startswith('.') else _extension(sub['url'], '.srt')
             lang = sub.get('lang') if isinstance(sub.get('lang'), str) and sub['lang'] else None
-            clean.append({'url': sub['url'], 'ext': ext, 'lang': lang})
+            entry = {'url': sub['url'], 'ext': ext, 'lang': lang}
+            headers = _clean_headers(sub.get('headers'))
+            if headers:
+                entry['headers'] = headers
+            clean.append(entry)
     return clean
+
+
+def normalize_files(files):
+    """What a driver's resolve() returned, checked: {'video': {'url', 'ext', and
+    'headers' if any}, 'subs': [...]}. An HLS video gets .mkv unless it asked for .ts
+    or .mp4. Raises ValueError for anything without a video url."""
+    video = files.get('video') if isinstance(files, dict) else None
+    url = video.get('url') if isinstance(video, dict) else None
+    if not isinstance(url, str) or not url:
+        raise ValueError("resolve() must return {'video': {'url': ...}, 'subs': [...]}")
+    ext = video.get('ext') if isinstance(video.get('ext'), str) and video['ext'].startswith('.') else None
+    if is_hls(url):
+        ext = ext if ext in FORMATS else DEFAULT_EXTENSION
+    else:
+        ext = ext or _extension(url)
+    clean = {'url': url, 'ext': ext}
+    headers = _clean_headers(video.get('headers'))
+    if headers:
+        clean['headers'] = headers
+    return {'video': clean, 'subs': _clean_subs(files.get('subs'))}
 
 
 def normalize_episodes(driver_name, result):
@@ -119,6 +151,9 @@ def normalize_episodes(driver_name, result):
             episode.pop('url', None)
             episode.pop('ext', None)
         episode['subs'] = _clean_subs(entry.get('subs'))
+        for key in ('season', 'episode'):  # whole numbers, or left for the title to say
+            if not isinstance(entry.get(key), int) or isinstance(entry.get(key), bool):
+                episode.pop(key, None)
         clean.append(episode)
     return str(title or ''), clean
 

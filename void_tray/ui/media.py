@@ -19,7 +19,7 @@ from ..media import (
     unwatched_count,
     upcoming,
 )
-from ..mediasources import NoDriver, normalize_saved
+from ..mediasources import NoDriver, normalize_files, normalize_saved
 from ..network import run_when_online
 from ..playback import counts_as_watched, play_media_file
 from ..state import new_media_entry, save_media
@@ -204,7 +204,7 @@ class MediaMixin:
                 base = episode_basepath(root, name, episode, taken, names=names)
                 saved = normalize_saved(driver.download(episode, base, progress, lambda: False))
             else:
-                files = driver.resolve(episode) if driver.resolve else resolve_files(episode)
+                files = normalize_files(driver.resolve(episode) if driver.resolve else resolve_files(episode))
                 paths = episode_paths(root, name, episode, files, taken, names=names)
                 saved = download_episode(paths, files, progress=progress)
         except Exception as error:  # the partial file stays, so the next try carries on

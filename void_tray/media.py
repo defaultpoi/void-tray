@@ -14,6 +14,8 @@ import urllib.request
 
 import feedparser
 
+from .hls import DownloadCancelled, download_hls, is_hls
+
 
 ARCHIVE_BASE = 'https://archive.org'
 USER_AGENT = 'void-tray (+https://github.com/defaultpoi/void-tray)'
@@ -23,10 +25,6 @@ ARCHIVE_MAX_ITEMS = 1000  # episodes read from one archive.org collection
 VIDEO_EXTENSIONS = ('.mp4', '.m4v', '.mkv', '.webm', '.avi', '.mov', '.mpg', '.mpeg', '.ogv')
 AUDIO_EXTENSIONS = ('.mp3', '.m4a', '.ogg', '.opus', '.flac', '.wav')
 SUBTITLE_EXTENSIONS = ('.srt', '.vtt', '.ass')
-
-
-class DownloadCancelled(Exception):
-    pass
 
 
 # ---- sources ---------------------------------------------------------------
@@ -114,7 +112,9 @@ def merge_episodes(entry, title, episodes, order):
     episodes that are new since the last check. The first check only sets the
     baseline: a series starts at its first episode, a podcast at its latest."""
     for episode in episodes:
-        episode['season'], episode['episode'] = season_episode(episode.get('title'))
+        given = (episode.get('season'), episode.get('episode'))
+        if not all(isinstance(n, int) and not isinstance(n, bool) for n in given):  # else read them from the title
+            episode['season'], episode['episode'] = season_episode(episode.get('title'))
     known = set(entry.get('known', []))
     entry['title'] = title
     entry['episodes'] = episodes
@@ -334,14 +334,15 @@ def episode_paths(root, source_title, episode, files, taken=(), names=()):
     return {'video': video, 'subs': subs}
 
 
-def download_file(url, dest, progress=None, cancelled=None, block_size=1 << 18):
+def download_file(url, dest, progress=None, cancelled=None, block_size=1 << 18, headers=None):
     """Downloads url to dest through dest + '.part', carrying on from a partial
-    file when the server allows. progress(done, total_or_None) after each block.
-    Raises on failure, keeping the partial file for the next try."""
+    file when the server allows. `headers` are sent with the request (a Referer, a
+    cookie). progress(done, total_or_None) after each block. Raises on failure,
+    keeping the partial file for the next try."""
     part = dest + '.part'
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     start = os.path.getsize(part) if os.path.exists(part) else 0
-    headers = {'User-Agent': USER_AGENT}
+    headers = {'User-Agent': USER_AGENT, **(headers or {})}
     if start:
         headers['Range'] = f'bytes={start}-'
     try:
@@ -377,15 +378,21 @@ def download_file(url, dest, progress=None, cancelled=None, block_size=1 << 18):
 
 def download_episode(paths, files, progress=None, cancelled=None):
     """Downloads an episode's subtitles (a failing one is skipped) and then its
-    video to `paths`. Returns {'video': path, 'subs': [the subtitle paths saved]}."""
+    video to `paths`; an HLS (.m3u8) video is fetched with ffmpeg, anything else
+    as a file. Each file is asked for with its own `headers`, if it has any.
+    Returns {'video': path, 'subs': [the subtitle paths saved]}."""
     saved = []
     for sub, path in zip(files['subs'], paths['subs']):
         try:
-            download_file(sub['url'], path, cancelled=cancelled)
+            download_file(sub['url'], path, cancelled=cancelled, headers=sub.get('headers'))
             saved.append(path)
         except DownloadCancelled:
             raise
         except (OSError, ValueError):
             pass  # an episode without its subtitles is better than none
-    download_file(files['video']['url'], paths['video'], progress=progress, cancelled=cancelled)
+    video = files['video']
+    if is_hls(video['url']):
+        download_hls(video['url'], paths['video'], headers=video.get('headers'), progress=progress, cancelled=cancelled)
+    else:
+        download_file(video['url'], paths['video'], progress=progress, cancelled=cancelled, headers=video.get('headers'))
     return {'video': paths['video'], 'subs': saved}

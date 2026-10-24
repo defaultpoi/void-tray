@@ -673,7 +673,7 @@ class TestDownloading(MediaCase):
             stub._download_media_episode(URL, 'a')
         resolved.assert_called_once()
         standard.assert_not_called()
-        self.assertIs(fetch.call_args.args[1], files)
+        self.assertEqual(fetch.call_args.args[1], {'video': {'url': 'http://h/a.mp4', 'ext': '.mp4'}, 'subs': []})  # checked on the way
 
     def test_an_episode_whose_driver_is_gone_fails_with_the_reason(self):
         stub = self.stub(dict(ep('a', 1), driver='gone-plugin'))

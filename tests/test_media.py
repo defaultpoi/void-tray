@@ -19,6 +19,7 @@ class FakeSite:
     def __init__(self):
         self.routes = {}
         self.requests = []
+        self.header_log = []  # the headers of every request, in order
         self.truncate = {}  # path -> bytes to send before cutting the connection
         site = self
 
@@ -30,6 +31,7 @@ class FakeSite:
                 path = urllib.parse.urlparse(self.path).path
                 query = urllib.parse.urlparse(self.path).query
                 site.requests.append((urllib.parse.unquote(path), query, self.headers.get('Range')))
+                site.header_log.append(dict(self.headers))
                 route = site.routes.get(urllib.parse.unquote(path))
                 if route is None:
                     self.send_error(404)
@@ -195,6 +197,26 @@ class TestMergeEpisodes(unittest.TestCase):
         rt.merge_episodes(entry, 'New Title', self.listing('a', 'b'), 'oldest')
         self.assertEqual(entry['title'], 'New Title')
         self.assertEqual([e['id'] for e in entry['episodes']], ['a', 'b'])
+
+    def test_numbers_a_driver_gives_are_kept_when_the_title_has_none(self):
+        entry = self.entry()
+        eps = [{'id': 'a', 'title': 'Go West, Old Man', 'date': '', 'season': 1, 'episode': 1},
+               {'id': 'b', 'title': 'Caprice', 'date': '', 'season': 1, 'episode': 3}]
+        rt.merge_episodes(entry, 'Show', eps, 'oldest')
+        self.assertEqual([(e['season'], e['episode']) for e in entry['episodes']], [(1, 1), (1, 3)])
+        self.assertEqual([rt.episode_label(e) for e in entry['episodes']], ['S01E01', 'S01E03'])
+
+    def test_numbers_a_driver_gives_win_over_the_title(self):
+        entry = self.entry()
+        rt.merge_episodes(entry, 'Show', [{'id': 'a', 'title': 'Show S09E09 Odd', 'date': '', 'season': 2, 'episode': 4}], 'oldest')
+        self.assertEqual((entry['episodes'][0]['season'], entry['episodes'][0]['episode']), (2, 4))
+
+    def test_numbers_that_are_not_whole_numbers_or_only_half_given_are_read_from_the_title_instead(self):
+        entry = self.entry()
+        eps = [{'id': 'a', 'title': 'Show S01E05 x', 'season': '1', 'episode': 5}, {'id': 'b', 'title': 'Show S02E06 x', 'season': True, 'episode': True},
+               {'id': 'c', 'title': 'Show S03E07 x', 'season': 3}, {'id': 'd', 'title': 'No number'}]
+        rt.merge_episodes(entry, 'Show', eps, 'oldest')
+        self.assertEqual([(e['season'], e['episode']) for e in entry['episodes']], [(1, 5), (2, 6), (3, 7), (None, None)])
 
     def test_numbers_are_read_from_the_titles(self):
         entry = self.entry()
@@ -541,6 +563,23 @@ class TestDownloads(SiteCase):
         self.assertTrue(os.path.exists(self.dest + '.part'))
         self.assertFalse(os.path.exists(self.dest))
 
+    def test_headers_are_sent_with_the_request(self):
+        rt.download_file(self.url, self.dest, headers={'Referer': 'https://embed.example/', 'X-Token': 'abc'})
+        sent = self.site.header_log[-1]
+        self.assertEqual((sent.get('Referer'), sent.get('X-Token')), ('https://embed.example/', 'abc'))
+        self.assertIn('void-tray', sent['User-Agent'])  # ours unless the caller sets one
+
+    def test_a_user_agent_in_the_headers_replaces_ours(self):
+        rt.download_file(self.url, self.dest, headers={'User-Agent': 'Mozilla/5.0 (test)'})
+        self.assertEqual(self.site.header_log[-1]['User-Agent'], 'Mozilla/5.0 (test)')
+
+    def test_a_resumed_download_keeps_its_headers_and_adds_the_range(self):
+        os.makedirs(os.path.dirname(self.dest))
+        with open(self.dest + '.part', 'wb') as f:
+            f.write(self.BODY[:1000])
+        rt.download_file(self.url, self.dest, headers={'Referer': 'https://embed.example/'})
+        self.assertEqual((self.site.header_log[-1].get('Referer'), self.site.header_log[-1].get('Range')), ('https://embed.example/', 'bytes=1000-'))
+
     def test_the_download_names_us(self):
         rt.download_file(self.url, self.dest)
         self.assertEqual(self.site.requests[-1][0], '/file.bin')
@@ -575,6 +614,45 @@ class TestDownloads(SiteCase):
         files['video']['url'] = f'{self.site.base}/missing.bin'
         with self.assertRaises(Exception):
             rt.download_episode(paths, files)
+
+    def test_each_file_is_asked_for_with_its_own_headers(self):
+        self.route('/a.srt', b'x', ctype='text/plain')
+        paths, files = self.paths_and_files()
+        files['subs'] = files['subs'][:1]
+        paths['subs'] = paths['subs'][:1]
+        files['subs'][0]['headers'] = {'X-For': 'subtitle'}
+        files['video']['headers'] = {'X-For': 'video'}
+        rt.download_episode(paths, files)
+        self.assertEqual([h.get('X-For') for h in self.site.header_log], ['subtitle', 'video'])
+
+    def test_an_hls_video_goes_to_ffmpeg_with_its_headers(self):
+        paths, files = self.paths_and_files()
+        files['video'] = {'url': 'https://cdn.example/a/master.m3u8?t=1', 'ext': '.mkv', 'headers': {'Referer': 'https://embed.example/'}}
+        files['subs'] = []
+        paths['subs'] = []
+        paths['video'] = os.path.join(self.dir, 'S', 'S - T.mkv')
+        progress, cancelled = mock.Mock(), mock.Mock()
+        with mock.patch.object(rt, 'download_hls', return_value=paths['video']) as hls, mock.patch.object(rt, 'download_file') as plain:
+            saved = rt.download_episode(paths, files, progress=progress, cancelled=cancelled)
+        hls.assert_called_once_with('https://cdn.example/a/master.m3u8?t=1', paths['video'], headers={'Referer': 'https://embed.example/'},
+                                    progress=progress, cancelled=cancelled)
+        plain.assert_not_called()
+        self.assertEqual(saved, {'video': paths['video'], 'subs': []})
+
+    def test_a_plain_file_does_not_go_to_ffmpeg(self):
+        self.route('/a.srt', b'x', ctype='text/plain')
+        paths, files = self.paths_and_files()
+        with mock.patch.object(rt, 'download_hls') as hls:
+            rt.download_episode(paths, files)
+        hls.assert_not_called()
+
+    def test_the_subtitles_of_an_hls_episode_are_still_tolerant(self):
+        paths, files = self.paths_and_files()  # /a.srt and /b.srt are not routes here: 404
+        files['video'] = {'url': 'https://cdn.example/index.m3u8', 'ext': '.mkv'}
+        with mock.patch.object(rt, 'download_hls') as hls:
+            saved = rt.download_episode(paths, files)
+        hls.assert_called_once()
+        self.assertEqual(saved['subs'], [])
 
     def test_cancelling_during_a_subtitle_is_not_swallowed(self):
         paths, files = self.paths_and_files()

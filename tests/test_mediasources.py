@@ -53,6 +53,17 @@ class TestNormalizeEpisodes(unittest.TestCase):
                                 {'url': 'http://h/a.vtt', 'ext': '.vtt', 'lang': None},
                                 {'url': 'http://h/b', 'ext': '.srt', 'lang': None}])
 
+    def test_season_and_episode_are_kept_when_they_are_whole_numbers(self):
+        eps = self.norm([{'id': 'a', 'season': 1, 'episode': 3}, {'id': 'b', 'season': '1', 'episode': 3.0},
+                         {'id': 'c', 'season': True, 'episode': None}, {'id': 'd'}])[1]
+        self.assertEqual([(e.get('season'), e.get('episode')) for e in eps], [(1, 3), (None, None), (None, None), (None, None)])
+
+    def test_subtitle_headers_are_kept_when_valid(self):
+        subs = self.norm([{'id': 'a', 'subs': [{'url': 'https://h/s.vtt', 'headers': {'Referer': 'https://e/'}},
+                                               {'url': 'https://h/t.vtt', 'headers': 'nope'}]}])[1][0]['subs']
+        self.assertEqual(subs[0]['headers'], {'Referer': 'https://e/'})
+        self.assertNotIn('headers', subs[1])
+
     def test_subtitles_that_are_not_a_list_are_none(self):
         self.assertEqual(self.norm([{'id': 'a', 'subs': 'x'}])[1][0]['subs'], [])
 
@@ -72,6 +83,44 @@ class TestNormalizeEpisodes(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             rt.normalize_episodes('mine', None)
         self.assertIn('mine: list_episodes must return (title, [episodes])', str(caught.exception))
+
+
+class TestNormalizeFiles(unittest.TestCase):
+    def test_a_file_with_everything_given(self):
+        files = {'video': {'url': 'https://h/a.mp4', 'ext': '.mp4', 'headers': {'Referer': 'https://e/'}},
+                 'subs': [{'url': 'https://h/a.vtt', 'ext': '.vtt', 'lang': 'ro', 'headers': {'Referer': 'https://e/'}}]}
+        self.assertEqual(rt.normalize_files(files), files)
+
+    def test_the_extension_comes_from_the_url_when_missing(self):
+        self.assertEqual(rt.normalize_files({'video': {'url': 'https://h/a.mkv?x=1'}})['video']['ext'], '.mkv')
+        self.assertEqual(rt.normalize_files({'video': {'url': 'https://h/stream', 'ext': 'mp4'}})['video']['ext'], '.mp4')
+
+    def test_an_hls_video_defaults_to_mkv_and_keeps_ts_or_mp4_when_asked(self):
+        for given, expected in ((None, '.mkv'), ('.ts', '.ts'), ('.mp4', '.mp4'), ('.mkv', '.mkv'), ('.avi', '.mkv'), ('ts', '.mkv')):
+            video = {'url': 'https://h/master.m3u8?t=1'}
+            if given:
+                video['ext'] = given
+            self.assertEqual(rt.normalize_files({'video': video})['video']['ext'], expected, given)
+
+    def test_headers_are_checked(self):
+        clean = rt.normalize_files({'video': {'url': 'https://h/a.mp4', 'headers': {'Referer': 'x', 'Bad\nName': 'y', 'N': 'a\nb', 5: 'z', 'Num': 7}}})
+        self.assertEqual(clean['video']['headers'], {'Referer': 'x'})  # nothing that could add a header line of its own
+        self.assertNotIn('headers', rt.normalize_files({'video': {'url': 'https://h/a.mp4', 'headers': 'x'}})['video'])
+        self.assertNotIn('headers', rt.normalize_files({'video': {'url': 'https://h/a.mp4', 'headers': {}}})['video'])
+
+    def test_subtitles_are_cleaned_like_an_episodes(self):
+        files = rt.normalize_files({'video': {'url': 'https://h/a.mp4'}, 'subs': [{'url': 'https://h/s.vtt'}, {'ext': '.srt'}, 'x']})
+        self.assertEqual(files['subs'], [{'url': 'https://h/s.vtt', 'ext': '.vtt', 'lang': None}])
+        self.assertEqual(rt.normalize_files({'video': {'url': 'https://h/a.mp4'}})['subs'], [])
+
+    def test_extra_keys_a_driver_added_are_dropped(self):
+        files = rt.normalize_files({'video': {'url': 'https://h/a.mp4', 'note': 1}, 'subs': [], '_embed_url': 'https://e/'})
+        self.assertEqual(files, {'video': {'url': 'https://h/a.mp4', 'ext': '.mp4'}, 'subs': []})
+
+    def test_without_a_video_url_it_is_an_error(self):
+        for bad in (None, 'x', {}, {'video': None}, {'video': {}}, {'video': {'url': ''}}, {'video': {'url': 5}}, {'subs': []}):
+            with self.assertRaises(ValueError, msg=bad):
+                rt.normalize_files(bad)
 
 
 class TestNormalizeSaved(unittest.TestCase):
