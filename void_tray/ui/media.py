@@ -5,8 +5,10 @@ import os
 import threading
 import time as time_module
 
-from ..gi_env import GLib, Gtk, Pango
+from ..gi_env import GLib, Gio, Gtk, Pango
 from ..config import load_media_settings, load_media_sources
+from ..constants import CONFIG_FILE
+from ..hls import is_hls
 from ..media import (
     clean_title,
     download_episode,
@@ -25,6 +27,8 @@ from ..playback import counts_as_watched, play_media_file
 from ..state import new_media_entry, save_media
 
 
+MEDIA_CONFIG_DEBOUNCE_MS = 800  # an editor or the browser extension may write the file in several steps
+PLAY_PARTIAL_MIN_BYTES = 1_500_000  # enough of a download for mpv to start on (about a minute of video)
 MEDIA_MARKER_COLORS = {'ready': '#2e8b57', 'busy': '#d08000', 'failed': '#c0392b', 'idle': '#808080'}
 
 
@@ -49,7 +53,7 @@ def media_row_view(name, entry, order, downloaded, status, error=None):
     text = ' '.join(p for p in (label, clean_title(episode.get('title'), (name, entry.get('title')))) if p)
     state = (status or {}).get('state')
     if state == 'downloading':
-        stats, color, hint = f"{status.get('percent', 0)}%", 'busy', 'Downloading'
+        stats, color, hint = f"{status.get('percent', 0)}%", 'busy', ('Click to watch while it downloads' if status.get('part') else 'Downloading')
     elif state == 'queued':
         stats, color, hint = 'queued', 'busy', 'Waiting to download'
     elif state == 'failed':
@@ -86,23 +90,47 @@ class MediaMixin:
         GLib.timeout_add_seconds(load_media_settings()['interval'], self.periodic_media_check)
         return False
 
-    def start_media_check(self):
-        if not self._media_check_lock.acquire(blocking=False):
-            return  # a check is already in flight: skip this tick
+    def start_media_check(self, only=None):
+        """Checks every source, or just those in `only` (sources that were added to
+        the config). A full check is skipped while another is running; a check of
+        particular sources is queued behind it, never lost."""
+        with self._media_request_lock:
+            if only is None and self._media_checking:
+                return  # a check is already in flight: skip this tick
+            if only is None:
+                self._media_pending_all = True
+            else:
+                self._media_pending |= set(only)
+            if self._media_checking:
+                return  # the running check looks for requests when it finishes
+            self._media_checking = True
         threading.Thread(target=self._check_media_guarded, daemon=True).start()
 
     def _check_media_guarded(self):
-        try:
-            self._check_media()
-        finally:
-            self._media_check_lock.release()
+        """Runs the requested checks one after another until none are waiting."""
+        while True:
+            with self._media_request_lock:
+                everything, wanted = self._media_pending_all, set(self._media_pending)
+                self._media_pending_all, self._media_pending = False, set()
+                if not everything and not wanted:
+                    self._media_checking = False  # decided under the lock, so no request slips in unseen
+                    return
+            try:
+                self._check_media(None if everything else wanted)
+            except BaseException:
+                with self._media_request_lock:
+                    self._media_checking = False
+                raise
 
-    def _check_media(self):
-        """Reads every configured source, remembers what is new, then queues the
-        downloads. A source that cannot be read keeps what is known of it."""
+    def _check_media(self, only=None):
+        """Reads every configured source (or those in `only`), remembers what is
+        new, then queues the downloads. A source that cannot be read keeps what is
+        known of it."""
         new_total = 0
         self.media_registry.refresh()  # picks up plugins that were added or edited
         for url, _name, configured in load_media_sources():
+            if only is not None and url not in only:
+                continue
             try:
                 driver, target = self.media_registry.driver_for(url)
                 title, episodes = driver.list_episodes(target)
@@ -118,6 +146,33 @@ class MediaMixin:
                 save_media(self.media)
         GLib.idle_add(self._on_media_new if new_total else self._refresh_media_rows)
         self._plan_media_downloads()
+
+    def watch_media_config(self):
+        """Looks out for changes to config.conf, so that a source added by an editor or
+        by the browser extension is read at once instead of at the next check."""
+        self._media_known_sources = {u for u, _n, _o in load_media_sources()}
+        try:
+            self._media_config_monitor = Gio.File.new_for_path(CONFIG_FILE).monitor_file(Gio.FileMonitorFlags.NONE, None)
+        except GLib.Error:
+            return  # no file monitoring here: new sources wait for the next check
+        self._media_config_monitor.connect('changed', self._on_media_config_event)
+
+    def _on_media_config_event(self, _monitor, _file, _other, _event):
+        if self._media_config_timer is not None:
+            GLib.source_remove(self._media_config_timer)  # one reaction to a burst of events
+        self._media_config_timer = GLib.timeout_add(MEDIA_CONFIG_DEBOUNCE_MS, self._media_config_changed)
+
+    def _media_config_changed(self):
+        self._media_config_timer = None
+        urls = [u for u, _n, _o in load_media_sources()]
+        new = [u for u in urls if u not in self._media_known_sources]
+        self._media_known_sources = set(urls)
+        if new:
+            self.start_media_check(only=new)
+        else:  # a name, an order or `ahead` may have changed: show it and keep the right ones downloaded
+            self._plan_media_downloads()
+            self._refresh_media_rows()
+        return False
 
     def _on_media_new(self):
         if self.popup and self.popup.get_visible():
@@ -172,6 +227,13 @@ class MediaMixin:
                 self._media_current = key
             self._download_media_episode(*key)
 
+    @staticmethod
+    def _file_size(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
     def _media_display_name(self, url, entry):
         configured = {u: n for u, n, _o in load_media_sources()}.get(url)
         return configured or entry.get('title') or url
@@ -189,12 +251,14 @@ class MediaMixin:
         self.media_status[key] = {'state': 'downloading', 'percent': 0}
         GLib.idle_add(self._refresh_media_rows)
         shown = [-1]
+        watchable = {}  # filled in for an HLS download to .ts or .mkv: its partial file plays while it grows
 
         def progress(done, total):
             percent = int(done * 100 / total) if total else 0
             if percent != shown[0]:
                 shown[0] = percent
-                self.media_status[key] = {'state': 'downloading', 'percent': percent}
+                self.media_status[key] = {'state': 'downloading', 'percent': percent, **watchable,
+                                          **({'length': total} if watchable and total else {})}  # seconds, for HLS
                 GLib.idle_add(self._refresh_media_rows)
 
         try:
@@ -206,6 +270,9 @@ class MediaMixin:
             else:
                 files = normalize_files(driver.resolve(episode) if driver.resolve else resolve_files(episode))
                 paths = episode_paths(root, name, episode, files, taken, names=names)
+                if is_hls(files['video']['url']) and paths['video'].lower().endswith(('.ts', '.mkv')):
+                    watchable['part'] = paths['video'] + '.part'
+                    self.media_status[key] = {'state': 'downloading', 'percent': max(shown[0], 0), **watchable}
                 saved = download_episode(paths, files, progress=progress)
         except Exception as error:  # the partial file stays, so the next try carries on
             self.media_status[key] = {'state': 'failed', 'error': describe_media_error(error)}
@@ -246,17 +313,27 @@ class MediaMixin:
             ready = self._media_file_ready(entry, episode['id'])
             path = entry['files'][episode['id']]['video'] if ready else None
             name = self._media_display_name(url, entry)
+        length = None  # the playlist's length, when playing a download that is not finished
         if not ready:
-            if self.media_status.get((url, episode['id']), {}).get('state') not in ('queued', 'downloading'):
-                self._enqueue_media([(url, episode['id'])], front=True)
-            return
+            status = self.media_status.get((url, episode['id']), {})
+            part = status.get('part')
+            if status.get('state') == 'downloading' and part and self._file_size(part) >= PLAY_PARTIAL_MIN_BYTES:
+                path, length = part, status.get('length')  # watch it while it downloads
+            else:
+                if status.get('state') not in ('queued', 'downloading'):
+                    self._enqueue_media([(url, episode['id'])], front=True)
+                return
         if self.popup:
             self.popup.hide()
         shown = clean_title(episode.get('title'), (name, entry.get('title')))
         title = f"{name} \u00b7 {' '.join(p for p in (episode_label(episode), shown) if p)}"
         episode_id = episode['id']
-        play_media_file(path, title, on_finished=lambda percent, remaining:
-                        GLib.idle_add(self._on_media_played, url, episode_id, percent, remaining))
+        # A partial file's own length is only an estimate, so how far it got is measured against the
+        # playlist's; without that, playing it is not tracked at all.
+        track = ready or bool(length)
+        play_media_file(path, title, total_seconds=length,
+                        on_finished=(lambda percent, remaining:
+                                     GLib.idle_add(self._on_media_played, url, episode_id, percent, remaining)) if track else None)
 
     def _on_media_played(self, url, episode_id, percent, remaining):
         if counts_as_watched(percent, remaining):

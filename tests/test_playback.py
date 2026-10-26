@@ -399,14 +399,15 @@ class TestCountsAsWatched(unittest.TestCase):
 
 
 class TestWatchLocalPlayback(unittest.TestCase):
-    def watch(self, script, clock=None):
+    def watch(self, script, clock=None, total=None):
         """Runs the watcher over scripted poll results; returns what on_finished got."""
         results = iter(script)
         done = []
-        with mock.patch.object(rt, '_mpv_get_properties', side_effect=lambda names: next(results)), \
+        self.asked = []
+        with mock.patch.object(rt, '_mpv_get_properties', side_effect=lambda names: self.asked.append(list(names)) or next(results)), \
                 mock.patch.object(rt.time_module, 'sleep'), \
                 mock.patch.object(rt.time_module, 'monotonic', side_effect=clock or (lambda: 0.0)):
-            rt._watch_local_playback('/v/a.mp4', lambda percent, remaining: done.append((percent, remaining)))
+            rt._watch_local_playback('/v/a.mp4', lambda percent, remaining: done.append((percent, remaining)), total_seconds=total)
         return done
 
     @staticmethod
@@ -435,6 +436,33 @@ class TestWatchLocalPlayback(unittest.TestCase):
     def test_mpv_gone_before_anything_loaded(self):
         self.assertEqual(self.watch([None]), [(None, None)])
 
+    def test_against_a_known_length_how_far_it_got_comes_from_the_time_not_mpvs_percent(self):
+        # mpv's own percent for a file that is still growing is against its length so far: it says 95 % here
+        growing = {'path': '/v/a.mp4', 'percent-pos': 95.0, 'time-remaining': 3.0, 'time-pos': 600.0}
+        self.assertEqual(self.watch([growing, None], total=2400), [(25.0, 1800.0)])
+
+    def test_it_asks_for_the_time_only_when_it_has_a_length(self):
+        self.watch([None])
+        self.assertEqual(self.asked[0], ['path', 'percent-pos', 'time-remaining'])
+        self.watch([None], total=100)
+        self.assertEqual(self.asked[0], ['path', 'percent-pos', 'time-remaining', 'time-pos'])
+
+    def test_the_furthest_point_and_the_least_remaining_are_kept_against_a_known_length(self):
+        at = lambda pos: {'path': '/v/a.mp4', 'percent-pos': 1, 'time-remaining': 1, 'time-pos': pos}
+        self.assertEqual(self.watch([at(100), at(2300), at(50), None], total=2400), [(2300 * 100 / 2400, 100.0)])
+
+    def test_watching_past_the_estimated_end_is_a_hundred_percent_at_most(self):
+        self.assertEqual(self.watch([{'path': '/v/a.mp4', 'percent-pos': 1, 'time-remaining': 1, 'time-pos': 3000.0}, None], total=2400), [(100.0, 0.0)])
+
+    def test_a_missing_time_is_ignored_against_a_known_length(self):
+        self.assertEqual(self.watch([{'path': '/v/a.mp4', 'percent-pos': 50, 'time-remaining': 5, 'time-pos': None}, None], total=100), [(None, None)])
+
+    def test_finishing_a_partial_file_counts_as_watched_by_the_playlists_length(self):
+        percent, remaining = self.watch([{'path': '/v/a.mp4', 'percent-pos': 1, 'time-remaining': 1, 'time-pos': 2300.0}, None], total=2400)[0]
+        self.assertTrue(rt.counts_as_watched(percent, remaining))
+        percent, remaining = self.watch([{'path': '/v/a.mp4', 'percent-pos': 99, 'time-remaining': 1, 'time-pos': 600.0}, None], total=2400)[0]
+        self.assertFalse(rt.counts_as_watched(percent, remaining))  # mpv said 99 %, the playlist says a quarter
+
     def test_values_that_are_not_numbers_are_ignored(self):
         bad = {'path': '/v/a.mp4', 'percent-pos': 'x', 'time-remaining': None}
         self.assertEqual(self.watch([bad, self.at(20, 80), None]), [(20, 80)])
@@ -450,7 +478,15 @@ class TestPlayMediaFile(unittest.TestCase):
         load.assert_called_once_with('/v/a.mp4', 'Show \u00b7 Pilot')
         self.assertEqual(thread.call_args.kwargs['target'], rt._watch_local_playback)
         self.assertEqual(thread.call_args.kwargs['args'], ('/v/a.mp4', done))
+        self.assertEqual(thread.call_args.kwargs['kwargs'], {'total_seconds': None})
         thread.return_value.start.assert_called_once_with()
+
+    def test_the_length_of_an_unfinished_download_is_handed_to_the_watcher(self):
+        with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/mpv'), \
+                mock.patch.object(rt, '_load_in_mpv', return_value=True), \
+                mock.patch.object(rt.threading, 'Thread') as thread:
+            rt.play_media_file('/v/a.ts.part', 'T', mock.Mock(), total_seconds=2501)
+        self.assertEqual(thread.call_args.kwargs['kwargs'], {'total_seconds': 2501})
 
     def test_without_a_callback_nothing_is_watched(self):
         with mock.patch.object(rt.shutil, 'which', return_value='/usr/bin/mpv'), \

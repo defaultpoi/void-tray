@@ -40,7 +40,13 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, MediaMixin, P
         self.media_status = {}  # (source url, episode id) -> download progress, in memory only
         self.media_errors = {}  # source -> why its last check failed, in memory only
         self.media_registry = MediaSources(MEDIA_PLUGIN_DIR)  # built-in drivers and the plugins
-        self._media_check_lock = threading.Lock()  # guards overlapping media-check cycles
+        self._media_request_lock = threading.Lock()  # guards the four fields below
+        self._media_checking = False  # a media-check thread is running
+        self._media_pending_all = False  # a full check was asked for while one was running
+        self._media_pending = set()  # sources to check once it is done
+        self._media_known_sources = set()  # the [media] sources the last look at config.conf found
+        self._media_config_monitor = None  # keeps the config.conf watcher alive
+        self._media_config_timer = None  # the pending reaction to a change of it
         self._media_data_lock = threading.Lock()  # guards self.media
         self._media_queue_lock = threading.Lock()  # guards the download queue below
         self._media_queue = []
@@ -126,6 +132,7 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, MediaMixin, P
         GLib.timeout_add_seconds(load_youtube_check_interval(), self.periodic_youtube_check)
         GLib.timeout_add_seconds(5, self.initial_media_check)
         GLib.timeout_add_seconds(load_media_settings()['interval'], self.periodic_media_check)
+        self.watch_media_config()
         GLib.timeout_add_seconds(1, self._timer_tick)
         GLib.timeout_add_seconds(1, lambda: self.probe_connectivity() and False)
         GLib.timeout_add_seconds(OFFLINE_PROBE_SECONDS, self.probe_connectivity)

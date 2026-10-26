@@ -187,19 +187,25 @@ def counts_as_watched(percent, remaining):
     return percent >= WATCHED_PERCENT or (percent >= 50 and remaining is not None and remaining <= WATCHED_REMAINING_SECONDS)
 
 
-def _watch_local_playback(path, on_finished, poll=WATCH_POLL_SECONDS):
+def _watch_local_playback(path, on_finished, poll=WATCH_POLL_SECONDS, total_seconds=None):
     """Follows `path` in the shared mpv until it is replaced or mpv quits, then calls
-    on_finished(furthest_percent, least_seconds_remaining) (None where never seen)."""
+    on_finished(furthest_percent, least_seconds_remaining) (None where never seen).
+    With total_seconds, how far it got is measured against that, since the length mpv
+    reports for a file that is still being downloaded is only an estimate."""
     percent = remaining = None
     loaded = False
     started = time_module.monotonic()
     while True:
-        values = _mpv_get_properties(['path', 'percent-pos', 'time-remaining'])
+        values = _mpv_get_properties(['path', 'percent-pos', 'time-remaining'] + (['time-pos'] if total_seconds else []))
         if values is None:  # mpv is gone: it quits when the file ends
             break
         if values.get('path') == path:
             loaded = True
             here, left = values.get('percent-pos'), values.get('time-remaining')
+            if total_seconds:
+                played = values.get('time-pos')
+                here = min(100.0, played * 100.0 / total_seconds) if isinstance(played, (int, float)) else None
+                left = max(0.0, total_seconds - played) if isinstance(played, (int, float)) else None
             if isinstance(here, (int, float)) and (percent is None or here > percent):
                 percent = here
             if isinstance(left, (int, float)) and (remaining is None or left < remaining):
@@ -210,11 +216,12 @@ def _watch_local_playback(path, on_finished, poll=WATCH_POLL_SECONDS):
     on_finished(percent, remaining)
 
 
-def play_media_file(path, title, on_finished=None):
+def play_media_file(path, title, on_finished=None, total_seconds=None):
     """Plays a local file in the shared mpv window; subtitles saved next to it with
     the same name load on their own. True when it was handed to a player. With
-    on_finished, a thread reports how far playback got (see _watch_local_playback);
-    without mpv the file goes to the desktop's default player, untracked."""
+    on_finished, a thread reports how far playback got (see _watch_local_playback;
+    total_seconds is the length of a file that is still being downloaded); without mpv
+    the file goes to the desktop's default player, untracked."""
     if not shutil.which('mpv'):
         try:
             subprocess.Popen(['xdg-open', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -224,7 +231,8 @@ def play_media_file(path, title, on_finished=None):
     if not _load_in_mpv(path, title):
         return False
     if on_finished:
-        threading.Thread(target=_watch_local_playback, args=(path, on_finished), daemon=True).start()
+        threading.Thread(target=_watch_local_playback, args=(path, on_finished), kwargs={'total_seconds': total_seconds},
+                         daemon=True).start()
     return True
 
 

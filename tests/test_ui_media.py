@@ -66,6 +66,10 @@ class Stub:
     _effective_order = rt.RssTray._effective_order
     _check_media_guarded = rt.RssTray._check_media_guarded
     start_media_check = rt.RssTray.start_media_check
+    watch_media_config = rt.RssTray.watch_media_config
+    _on_media_config_event = rt.RssTray._on_media_config_event
+    _media_config_changed = rt.RssTray._media_config_changed
+    _file_size = staticmethod(rt.RssTray._file_size)
     _check_media = rt.RssTray._check_media
     _on_media_new = rt.RssTray._on_media_new
     _media_file_ready = staticmethod(rt.RssTray._media_file_ready)
@@ -88,7 +92,13 @@ class Stub:
         self.media_status = {}
         self.media_errors = {}
         self.media_registry = FakeRegistry()
-        self._media_check_lock = threading.Lock()
+        self._media_request_lock = threading.Lock()
+        self._media_checking = False
+        self._media_pending_all = False
+        self._media_pending = set()
+        self._media_known_sources = set()
+        self._media_config_monitor = None
+        self._media_config_timer = None
         self._media_data_lock = threading.Lock()
         self._media_queue_lock = threading.Lock()
         self._media_queue = []
@@ -326,30 +336,96 @@ class TestChecking(MediaCase):
         for driver in stub.media_registry.by_source.values():
             driver.list_episodes.assert_not_called()
 
-    def test_overlapping_checks_are_skipped(self):
+    def test_a_full_check_is_skipped_while_another_is_running(self):
         stub = Stub()
-        stub._media_check_lock.acquire()
+        stub._media_checking = True
         with mock.patch.object(rt.threading, 'Thread') as thread:
             stub.start_media_check()
         thread.assert_not_called()
+        self.assertFalse(stub._media_pending_all)  # skipped, not queued: the periodic tick does not pile up
 
-    def test_a_check_runs_in_a_thread_and_releases_its_lock(self):
+    def test_a_check_runs_in_a_thread(self):
         stub = Stub()
-        stub._check_media = mock.Mock()
         with mock.patch.object(rt.threading, 'Thread') as thread:
             stub.start_media_check()
-            self.assertEqual(thread.call_args.kwargs['target'], stub._check_media_guarded)
-        stub._check_media_guarded()
-        stub._check_media.assert_called_once_with()
-        self.assertTrue(stub._media_check_lock.acquire(blocking=False))
+        self.assertEqual(thread.call_args.kwargs['target'], stub._check_media_guarded)
+        thread.return_value.start.assert_called_once_with()
+        self.assertTrue(stub._media_checking)
+        self.assertTrue(stub._media_pending_all)
 
-    def test_a_check_that_blows_up_still_releases_its_lock(self):
+    def test_a_check_of_given_sources_is_queued_behind_the_one_running(self):
         stub = Stub()
+        stub._media_checking = True
+        with mock.patch.object(rt.threading, 'Thread') as thread:
+            stub.start_media_check(only=['https://new.example/a'])
+            stub.start_media_check(only=['https://new.example/b'])
+        thread.assert_not_called()
+        self.assertEqual(stub._media_pending, {'https://new.example/a', 'https://new.example/b'})
+
+    def test_a_check_of_given_sources_starts_when_none_is_running(self):
+        stub = Stub()
+        with mock.patch.object(rt.threading, 'Thread') as thread:
+            stub.start_media_check(only=['https://new.example/a'])
+        thread.return_value.start.assert_called_once_with()
+        self.assertEqual(stub._media_pending, {'https://new.example/a'})
+        self.assertFalse(stub._media_pending_all)
+
+    def test_the_thread_runs_what_was_asked_for_and_then_stops(self):
+        stub = Stub()
+        stub._media_checking = True
+        stub._media_pending_all = True
+        stub._check_media = mock.Mock()
+        stub._check_media_guarded()
+        stub._check_media.assert_called_once_with(None)
+        self.assertFalse(stub._media_checking)
+        self.assertEqual((stub._media_pending, stub._media_pending_all), (set(), False))
+
+    def test_a_request_that_arrives_during_a_check_is_run_right_after_it(self):
+        stub = Stub()
+        stub._media_checking = True
+        stub._media_pending_all = True
+        calls = []
+
+        def check(only):
+            calls.append(only)
+            if len(calls) == 1:
+                stub.start_media_check(only=['https://new.example/a'])  # added while the first check runs
+        stub._check_media = check
+        stub._check_media_guarded()
+        self.assertEqual(calls, [None, {'https://new.example/a'}])
+        self.assertFalse(stub._media_checking)
+
+    def test_a_full_request_wins_over_queued_sources(self):
+        stub = Stub()
+        stub._media_checking = True
+        stub._media_pending_all = True
+        stub._media_pending = {'https://new.example/a'}
+        stub._check_media = mock.Mock()
+        stub._check_media_guarded()
+        stub._check_media.assert_called_once_with(None)  # everything includes it
+
+    def test_a_check_that_blows_up_lets_the_next_one_start(self):
+        stub = Stub()
+        stub._media_checking = True
+        stub._media_pending_all = True
         stub._check_media = mock.Mock(side_effect=RuntimeError('boom'))
-        stub._media_check_lock.acquire()
         with self.assertRaises(RuntimeError):
             stub._check_media_guarded()
-        self.assertTrue(stub._media_check_lock.acquire(blocking=False))
+        self.assertFalse(stub._media_checking)
+        with mock.patch.object(rt.threading, 'Thread') as thread:
+            stub.start_media_check()
+        thread.return_value.start.assert_called_once_with()
+
+    def test_only_the_asked_for_sources_are_read(self):
+        self.sources = [(URL, None, None), (POD, None, None)]
+        stub = Stub()
+        stub._plan_media_downloads = mock.Mock()
+        stub.media_registry.listing(URL, ('Show', [ep('a', 1)]))
+        stub.media_registry.listing(POD, ('Pod', [ep('p', 1)]))
+        stub._check_media(only={POD})
+        stub.media_registry.by_source[URL].list_episodes.assert_not_called()
+        self.assertEqual(list(stub.media['sources']), [POD])
+        stub._plan_media_downloads.assert_called_once_with()
 
     def test_new_episodes_open_a_closed_popup_like_a_channel_going_live(self):
         stub = Stub()
@@ -381,6 +457,189 @@ class TestDescribeError(unittest.TestCase):
 
     def test_long_messages_are_cut(self):
         self.assertEqual(len(rt.describe_media_error(ValueError('x' * 1000))), 300)
+
+
+class TestConfigWatcher(MediaCase):
+    def test_it_remembers_the_sources_and_watches_the_config_file(self):
+        self.sources = [(URL, None, None), (POD, None, None)]
+        stub = Stub()
+        with mock.patch.object(rt, 'Gio') as gio:
+            stub.watch_media_config()
+        self.assertEqual(stub._media_known_sources, {URL, POD})
+        gio.File.new_for_path.assert_called_once_with(rt.CONFIG_FILE)
+        monitor = gio.File.new_for_path.return_value.monitor_file.return_value
+        monitor.connect.assert_called_once_with('changed', stub._on_media_config_event)
+        self.assertIs(stub._media_config_monitor, monitor)  # kept, or it would stop
+
+    def test_without_file_monitoring_nothing_breaks(self):
+        stub = Stub()
+        with mock.patch.object(rt, 'Gio') as gio, mock.patch.object(rt.GLib, 'Error', Exception):
+            gio.File.new_for_path.return_value.monitor_file.side_effect = Exception('no inotify')
+            stub.watch_media_config()
+        self.assertIsNone(stub._media_config_monitor)
+        self.assertEqual(stub._media_known_sources, {URL})
+
+    def test_a_burst_of_events_is_one_reaction(self):
+        stub = Stub()
+        with mock.patch.object(rt.GLib, 'timeout_add', side_effect=[11, 12, 13]) as add, \
+                mock.patch.object(rt.GLib, 'source_remove') as remove:
+            for _ in range(3):
+                stub._on_media_config_event(None, None, None, None)
+        self.assertEqual(add.call_count, 3)
+        add.assert_called_with(rt.MEDIA_CONFIG_DEBOUNCE_MS, stub._media_config_changed)
+        self.assertEqual([c.args[0] for c in remove.call_args_list], [11, 12])  # each cancelled the one before
+        self.assertEqual(stub._media_config_timer, 13)
+
+    def test_a_new_source_is_checked_at_once_and_only_it(self):
+        self.sources = [(URL, None, None), (POD, 'Pod', None)]
+        stub = Stub()
+        stub._media_known_sources = {URL}
+        stub.start_media_check = mock.Mock()
+        stub._plan_media_downloads = mock.Mock()
+        self.assertFalse(stub._media_config_changed())
+        stub.start_media_check.assert_called_once_with(only=[POD])
+        self.assertEqual(stub._media_known_sources, {URL, POD})
+        stub._plan_media_downloads.assert_not_called()
+
+    def test_several_new_sources_are_checked_together(self):
+        self.sources = [(URL, None, None), (POD, None, None), ('yt-dlp:https://v.example/x', None, None)]
+        stub = Stub()
+        stub._media_known_sources = {URL}
+        stub.start_media_check = mock.Mock()
+        stub._media_config_changed()
+        stub.start_media_check.assert_called_once_with(only=[POD, 'yt-dlp:https://v.example/x'])
+
+    def test_a_change_that_adds_no_source_updates_what_is_shown_and_downloaded(self):
+        self.sources = [(URL, 'A new name', 'newest')]
+        stub = Stub()
+        stub._media_known_sources = {URL}
+        stub.start_media_check = mock.Mock()
+        stub._plan_media_downloads = mock.Mock()
+        stub._refresh_media_rows = mock.Mock()
+        stub._media_config_changed()
+        stub.start_media_check.assert_not_called()
+        stub._plan_media_downloads.assert_called_once_with()
+        stub._refresh_media_rows.assert_called_once_with()
+
+    def test_removing_a_source_checks_nothing_and_adding_it_back_does(self):
+        stub = Stub()
+        stub._media_known_sources = {URL, POD}
+        stub.start_media_check = mock.Mock()
+        stub._plan_media_downloads = mock.Mock()
+        stub._refresh_media_rows = mock.Mock()
+        stub._media_config_changed()  # only URL is left
+        stub.start_media_check.assert_not_called()
+        self.assertEqual(stub._media_known_sources, {URL})
+        self.sources = [(URL, None, None), (POD, None, None)]
+        stub._media_config_changed()
+        stub.start_media_check.assert_called_once_with(only=[POD])
+
+    def test_a_config_that_could_not_be_read_for_a_moment_is_not_a_new_source_later(self):
+        stub = Stub()
+        stub._media_known_sources = {URL}
+        stub.start_media_check = mock.Mock()
+        stub._plan_media_downloads = mock.Mock()
+        stub._refresh_media_rows = mock.Mock()
+        self.sources = []  # half-written file
+        stub._media_config_changed()
+        self.sources = [(URL, None, None)]
+        stub._media_config_changed()
+        stub.start_media_check.assert_called_once_with(only=[URL])  # checked again, which is harmless
+
+
+class TestWatchingWhileItDownloads(MediaCase):
+    def stub(self, status, size=3_000_000, *episodes):
+        stub = Stub()
+        stub.media['sources'][URL] = entry_with(*(episodes or (ep('a', 1),)))
+        stub.media_status[(URL, 'a')] = status
+        stub._enqueue_media = mock.Mock()
+        stub._file_size = lambda path: size
+        return stub
+
+    DOWNLOADING = {'state': 'downloading', 'percent': 30, 'part': '/v/Show/Show - S01E01 - a.ts.part', 'length': 2501}
+
+    def test_a_row_that_is_downloading_plays_the_partial_file_measured_against_the_playlist(self):
+        stub = self.stub(dict(self.DOWNLOADING))
+        with mock.patch.object(rt, 'play_media_file') as play:
+            stub.on_media_row_clicked(URL)
+        self.assertEqual(play.call_args.args[0], '/v/Show/Show - S01E01 - a.ts.part')
+        self.assertEqual(play.call_args.kwargs['total_seconds'], 2501)
+        stub.popup.hide.assert_called_once_with()
+        stub._enqueue_media.assert_not_called()  # the download carries on
+        play.call_args.kwargs['on_finished'](95.0, 5.0)
+        self.assertEqual(self.queued(stub, '_on_media_played'), [(URL, 'a', 95.0, 5.0)])
+
+    def test_with_too_little_downloaded_the_click_does_nothing(self):
+        stub = self.stub(dict(self.DOWNLOADING), size=400_000)
+        with mock.patch.object(rt, 'play_media_file') as play:
+            stub.on_media_row_clicked(URL)
+        play.assert_not_called()
+        stub._enqueue_media.assert_not_called()
+
+    def test_without_a_length_it_plays_but_does_not_track(self):
+        stub = self.stub({'state': 'downloading', 'percent': 0, 'part': '/v/x.ts.part'})
+        with mock.patch.object(rt, 'play_media_file') as play:
+            stub.on_media_row_clicked(URL)
+        play.assert_called_once()
+        self.assertIsNone(play.call_args.kwargs['on_finished'])  # mpv's own length for a growing file would mislead
+        self.assertIsNone(play.call_args.kwargs['total_seconds'])
+
+    def test_a_download_that_cannot_be_watched_still_just_waits(self):
+        stub = self.stub({'state': 'downloading', 'percent': 30})  # a plain file, or an mp4
+        with mock.patch.object(rt, 'play_media_file') as play:
+            stub.on_media_row_clicked(URL)
+        play.assert_not_called()
+        stub._enqueue_media.assert_not_called()
+
+    def test_a_queued_one_is_not_playable(self):
+        stub = self.stub({'state': 'queued'})
+        with mock.patch.object(rt, 'play_media_file') as play:
+            stub.on_media_row_clicked(URL)
+        play.assert_not_called()
+
+    def test_a_finished_download_plays_the_finished_file_as_before(self):
+        path = self.touch('a.ts')
+        stub = Stub()
+        stub.media['sources'][URL] = entry_with(ep('a', 1), files={'a': {'video': path, 'subs': []}})
+        with mock.patch.object(rt, 'play_media_file') as play:
+            stub.on_media_row_clicked(URL)
+        self.assertEqual(play.call_args.args[0], path)
+        self.assertIsNone(play.call_args.kwargs['total_seconds'])
+        self.assertIsNotNone(play.call_args.kwargs['on_finished'])
+
+    def test_the_row_says_it_can_be_watched(self):
+        entry = entry_with(ep('a', 1))
+        view = rt.media_row_view('Show', entry, 'oldest', False, dict(self.DOWNLOADING))
+        self.assertEqual(view[2], '30%')
+        self.assertIn('Click to watch while it downloads', view[3])
+        plain = rt.media_row_view('Show', entry, 'oldest', False, {'state': 'downloading', 'percent': 30})
+        self.assertNotIn('Click to watch', plain[3])  # ("unwatched" is in there, so the whole word is not the test)
+        self.assertIn('Downloading', plain[3])
+
+    def test_the_download_publishes_its_partial_file_and_the_length_for_hls_only(self):
+        stub = Stub()
+        stub.media['sources'][URL] = entry_with(dict(ep('a', 1), driver='archive'))
+        seen = []
+
+        def fake_download(paths, files, progress=None, cancelled=None):
+            seen.append(dict(stub.media_status[(URL, 'a')]))
+            progress(10, 100)
+            seen.append(dict(stub.media_status[(URL, 'a')]))
+            return {'video': paths['video'], 'subs': []}
+        for url, ext, expect_part in (('https://cdn.example/x/master.m3u8?t=1', '.ts', True), ('https://cdn.example/x/index.m3u8', '.mkv', True),
+                                      ('https://cdn.example/x/index.m3u8', '.mp4', False), ('https://cdn.example/x/video.mp4', '.mp4', False)):
+            seen.clear()
+            files = {'video': {'url': url, 'ext': ext}, 'subs': []}
+            stub.media_registry.by_source[URL].resolve = lambda e, f=files: f
+            with mock.patch.object(rt, 'download_episode', side_effect=fake_download):
+                stub._download_media_episode(URL, 'a')
+            has_part = 'part' in seen[0]
+            self.assertEqual(has_part, expect_part, (url, ext))
+            if expect_part:
+                self.assertTrue(seen[0]['part'].endswith(ext + '.part'))
+                self.assertEqual(seen[1]['length'], 100)
+            else:
+                self.assertNotIn('length', seen[1])
 
 
 class TestPeriodicCheck(MediaCase):
