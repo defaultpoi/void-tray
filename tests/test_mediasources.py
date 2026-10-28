@@ -498,11 +498,11 @@ class TestBuiltInDrivers(unittest.TestCase):
         self.assertEqual((title, episodes[0]['driver']), ('Chan', 'yt-dlp'))
 
     def test_the_ytdlp_driver_downloads_with_the_extra_arguments_too(self):
-        with mock.patch.object(rt, 'load_media_settings', return_value={'ytdlp': ['--proxy', 'p']}), \
+        with mock.patch.object(rt, 'load_media_settings', return_value={'ytdlp': ['--proxy', 'p'], 'screen': (1366, 768)}), \
                 mock.patch.object(rt, 'download_ytdlp', return_value={'video': 'v', 'subs': []}) as fetch:
             progress, cancelled = mock.Mock(), mock.Mock()
             result = self.registry.by_name('yt-dlp').download({'id': 'x', 'url': 'u'}, '/v/S/base', progress, cancelled)
-        fetch.assert_called_once_with({'id': 'x', 'url': 'u'}, '/v/S/base', progress, cancelled, ['--proxy', 'p'])
+        fetch.assert_called_once_with({'id': 'x', 'url': 'u'}, '/v/S/base', progress, cancelled, ['--proxy', 'p'], (1366, 768))  # and the screen
         self.assertEqual(result, {'video': 'v', 'subs': []})
 
     def test_archive_and_feed_drivers_read_their_sources(self):

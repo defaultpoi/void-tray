@@ -102,24 +102,79 @@ class TestPlaylistReading(unittest.TestCase):
     def test_the_variants_of_a_master_playlist(self):
         variants = rt.parse_master(MASTER_PLAYLIST, 'https://cdn.example/a/master.m3u8?x=1')
         self.assertEqual(variants, [
-            {'url': 'https://cdn.example/a/low.m3u8?token=a', 'bandwidth': 358300, 'height': 360},
-            {'url': 'https://cdn.example/a/high/index.m3u8?token=b', 'bandwidth': 1276054, 'height': 720}])
+            {'url': 'https://cdn.example/a/low.m3u8?token=a', 'bandwidth': 358300, 'width': 720, 'height': 360},
+            {'url': 'https://cdn.example/a/high/index.m3u8?token=b', 'bandwidth': 1276054, 'width': 1440, 'height': 720}])
 
     def test_a_media_playlist_has_no_variants(self):
         self.assertEqual(rt.parse_master(MEDIA_PLAYLIST, 'https://h/index.m3u8'), [])
 
     def test_absolute_variant_urls_and_missing_attributes(self):
         text = '#EXTM3U\n#EXT-X-STREAM-INF:PROGRAM-ID=1\nhttps://other.example/v.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=5\n'
-        self.assertEqual(rt.parse_master(text, 'https://h/m.m3u8'), [{'url': 'https://other.example/v.m3u8', 'bandwidth': 0, 'height': 0}])
+        self.assertEqual(rt.parse_master(text, 'https://h/m.m3u8'), [{'url': 'https://other.example/v.m3u8', 'bandwidth': 0, 'width': 0, 'height': 0}])
 
     def test_a_comment_between_the_tag_and_its_uri_is_skipped(self):
         text = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\n# a comment\n\nv.m3u8\n'
         self.assertEqual(rt.parse_master(text, 'https://h/m.m3u8')[0]['url'], 'https://h/v.m3u8')
 
-    def test_the_best_variant_has_the_most_bandwidth_then_the_most_height(self):
-        variants = [{'url': 'a', 'bandwidth': 100, 'height': 1080}, {'url': 'b', 'bandwidth': 300, 'height': 360},
-                    {'url': 'c', 'bandwidth': 300, 'height': 720}]
-        self.assertEqual(rt.best_variant(variants)['url'], 'c')
+    @staticmethod
+    def variants(*sizes):
+        """Variants given as (width, height, bandwidth); a size of 0 is one the playlist did not state."""
+        return [{'url': f'{w}x{h}@{b}', 'bandwidth': b, 'width': w, 'height': h} for w, h, b in sizes]
+
+    def picked(self, sizes, screen):
+        return rt.pick_variant(self.variants(*sizes), screen)['url']
+
+    SCREEN = (1366, 768)
+
+    def test_without_a_screen_the_most_bandwidth_wins(self):
+        self.assertEqual(self.picked([(1920, 1080, 5000), (1280, 720, 2500), (640, 360, 800)], None), '1920x1080@5000')
+
+    def test_the_best_that_fits_the_screen(self):
+        self.assertEqual(self.picked([(1920, 1080, 5000), (1280, 720, 2500), (640, 360, 800)], self.SCREEN), '1280x720@2500')
+
+    def test_a_version_a_little_wider_than_the_screen_still_fits_when_its_height_does(self):
+        # fsonline's 1440x720 on 1366x768: shown scaled to fit it is within 5 % of the screen
+        self.assertEqual(self.picked([(1440, 720, 1276054), (720, 360, 358300)], self.SCREEN), '1440x720@1276054')
+
+    def test_a_film_in_scope_ratio_is_judged_by_its_width(self):
+        self.assertEqual(self.picked([(1920, 800, 6000), (1280, 534, 2500), (854, 356, 1000)], self.SCREEN), '1280x534@2500')
+
+    def test_when_the_only_version_is_larger_than_the_screen_it_is_taken(self):
+        self.assertEqual(self.picked([(1920, 1080, 5000)], self.SCREEN), '1920x1080@5000')
+        self.assertEqual(self.picked([(1920, 800, 6000)], self.SCREEN), '1920x800@6000')
+
+    def test_when_every_version_is_larger_the_smallest_is_taken(self):
+        self.assertEqual(self.picked([(3840, 2160, 20000), (1920, 1080, 5000), (2560, 1440, 9000)], self.SCREEN), '1920x1080@5000')
+
+    def test_the_tolerance_is_a_little_over_the_screen_and_no_more(self):
+        screen = (1000, 500)
+        self.assertEqual(self.picked([(1150, 575, 900), (500, 250, 100)], screen), '1150x575@900')  # exactly 15 % over fits
+        self.assertEqual(self.picked([(1160, 580, 900), (500, 250, 100)], screen), '500x250@100')  # 16 % over does not
+
+    def test_a_smaller_screen_takes_a_smaller_version(self):
+        sizes = [(1920, 1080, 5000), (1280, 720, 2500), (640, 360, 800)]
+        self.assertEqual(self.picked(sizes, (1920, 1080)), '1920x1080@5000')
+        self.assertEqual(self.picked(sizes, (1280, 720)), '1280x720@2500')
+        self.assertEqual(self.picked(sizes, (800, 480)), '640x360@800')
+        self.assertEqual(self.picked(sizes, (3840, 2160)), '1920x1080@5000')  # a bigger screen takes the best there is
+
+    def test_nothing_fitting_and_everything_larger_still_picks_the_closest(self):
+        self.assertEqual(self.picked([(1920, 1080, 5000), (1280, 720, 2500)], (640, 360)), '1280x720@2500')
+
+    def test_of_two_versions_of_the_same_size_the_one_with_more_bandwidth(self):
+        self.assertEqual(self.picked([(1280, 720, 1500), (1280, 720, 2500)], self.SCREEN), '1280x720@2500')
+
+    def test_a_portrait_video_is_judged_by_its_height(self):
+        self.assertEqual(self.picked([(1080, 1920, 5000), (720, 1280, 2500), (360, 640, 800)], self.SCREEN), '360x640@800')
+
+    def test_versions_that_do_not_say_their_size_fall_back_to_bandwidth(self):
+        self.assertEqual(self.picked([(0, 0, 900), (0, 0, 300)], self.SCREEN), '0x0@900')
+
+    def test_versions_that_do_say_are_preferred_when_some_do_not(self):
+        self.assertEqual(self.picked([(0, 0, 9000), (1280, 720, 2500), (1920, 1080, 5000)], self.SCREEN), '1280x720@2500')
+
+    def test_the_best_of_only_one_is_that_one(self):
+        self.assertEqual(self.picked([(1920, 1080, 5000)], None), '1920x1080@5000')
 
     def test_the_length_is_the_sum_of_the_segments(self):
         self.assertEqual(rt.playlist_seconds(MEDIA_PLAYLIST), 25.5)
@@ -200,6 +255,14 @@ class TestDownloadingWithAFakeFfmpeg(FakeFfmpegCase):
         self.assertEqual(command[command.index('-i') + 1], self.site.base + '/high/index.m3u8?token=b')
         self.assertEqual(self.site.paths, ['/master.m3u8', '/high/index.m3u8?token=b'])
         self.assertTrue(all(h.get('X-Test') == '1' for h in self.site.header_log))  # the playlists were asked for the same way
+
+    def test_the_variant_that_suits_the_screen_is_downloaded(self):
+        for screen, expected in (((1366, 768), '/high/index.m3u8?token=b'), ((640, 360), '/low.m3u8?token=a'), ((320, 180), '/low.m3u8?token=a'),
+                                 (None, '/high/index.m3u8?token=b')):
+            self.site.paths.clear()
+            self.run_download('/master.m3u8', screen=screen)
+            command = self.calls()[-1]
+            self.assertEqual(command[command.index('-i') + 1], self.site.base + expected, screen)
 
     def test_the_containers(self):
         for extension, name in (('.ts', 'mpegts'), ('.mkv', 'matroska'), ('.mp4', 'mp4'), ('.MKV', 'matroska')):

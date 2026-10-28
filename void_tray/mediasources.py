@@ -21,6 +21,7 @@ from .config import load_media_settings
 from .hls import DEFAULT_EXTENSION, FORMATS, is_hls
 from .log import _log
 from .media import archive_identifier, list_archive, list_feed
+from .screen import media_target_size
 from .ytdlp import download_ytdlp, is_youtube_url, list_ytdlp
 
 
@@ -38,7 +39,7 @@ def _list_ytdlp_source(source):
 
 
 def _download_ytdlp_episode(episode, base, progress, cancelled):
-    return download_ytdlp(episode, base, progress, cancelled, load_media_settings()['ytdlp'])
+    return download_ytdlp(episode, base, progress, cancelled, load_media_settings()['ytdlp'], media_target_size())
 
 
 def _builtin_drivers():

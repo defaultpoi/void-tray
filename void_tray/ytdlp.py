@@ -23,7 +23,8 @@ LIST_TIMEOUT_SECONDS = 300
 MAX_PLAYLISTS = 10  # playlists opened from a channel's podcasts or playlists tab
 
 # What every download gets; the `ytdlp=` setting comes after these and wins over them.
-DOWNLOAD_ARGS = ['-S', 'res:1080', '--write-subs', '--sub-langs', 'en.*,-live_chat', '--sub-format', 'srt/vtt/best',
+DEFAULT_HEIGHT = 1080  # the tallest video wanted when the screen's size is not known
+DOWNLOAD_ARGS = ['--write-subs', '--sub-langs', 'en.*,-live_chat', '--sub-format', 'srt/vtt/best',
                  '--no-playlist', '--no-warnings']
 LIST_ARGS = ['--flat-playlist', '--dump-single-json', '--no-warnings', '--extractor-args', 'youtubetab:approximate_date']
 
@@ -140,15 +141,18 @@ def list_ytdlp(url, extra_args=()):
     return title, episodes
 
 
-def download_ytdlp(episode, base, progress=None, cancelled=None, extra_args=()):
+def download_ytdlp(episode, base, progress=None, cancelled=None, extra_args=(), screen=None):
     """Downloads an episode with yt-dlp to `base` + its extension, with the
     subtitles it has as `base`.<lang>.<ext>. Returns {'video': path, 'subs': [paths]}.
-    progress(done, total_or_None) is reported per stream (video, then audio)."""
+    progress(done, total_or_None) is reported per stream (video, then audio). The video is
+    the best one no taller than the screen (yt-dlp's `-S res:N`: the smallest taller one
+    when there is none), 1080 without a screen; `extra_args` come later and win."""
     env = topgrade_env()
     directory = os.path.dirname(base)
     os.makedirs(directory, exist_ok=True)
     # --print makes yt-dlp quiet, which hides the progress lines unless --progress is given
-    command = [find_ytdlp(env), *DOWNLOAD_ARGS, *extra_args, '--newline', '--no-simulate', '--progress',
+    command = [find_ytdlp(env), '-S', f'res:{screen[1] if screen else DEFAULT_HEIGHT}', *DOWNLOAD_ARGS, *extra_args,
+               '--newline', '--no-simulate', '--progress',
                '--progress-template', f'download:{_PROGRESS_MARK}%(progress.downloaded_bytes)s %(progress.total_bytes)s '
                                       '%(progress.total_bytes_estimate)s %(progress.filename)s',
                '--print', f'after_move:{_FILE_MARK}%(filepath)s', '-o', base + '.%(ext)s', '--', episode['url']]

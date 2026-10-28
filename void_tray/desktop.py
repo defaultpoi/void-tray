@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import threading
 
-from .gi_env import GLib, Gio, Wnck
+from .gi_env import GLib, Gdk, Gio, Wnck
 from .constants import CONFIG_DIR
 from .log import _log
 
@@ -42,6 +42,20 @@ def play_notification_sound():
                 return
             except Exception:
                 continue
+
+
+def primary_monitor_size():
+    """(width, height) in pixels of the primary monitor, at its scale factor (a 1366x768
+    panel set to 2x is 2732x1536 pixels of picture); None when there is no display to ask.
+    Main thread only."""
+    display = Gdk.Display.get_default()
+    if display is None:
+        return None
+    monitor = display.get_primary_monitor() or display.get_monitor(0)
+    if monitor is None:
+        return None
+    geometry, scale = monitor.get_geometry(), monitor.get_scale_factor() or 1
+    return (geometry.width * scale, geometry.height * scale)
 
 
 def is_fullscreen_active():

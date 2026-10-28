@@ -133,6 +133,7 @@ class RssTray(ConnectivityMixin, FeedsMixin, IconMixin, LiveMixin, MediaMixin, P
         GLib.timeout_add_seconds(5, self.initial_media_check)
         GLib.timeout_add_seconds(load_media_settings()['interval'], self.periodic_media_check)
         self.watch_media_config()
+        self._measure_screen()
         GLib.timeout_add_seconds(1, self._timer_tick)
         GLib.timeout_add_seconds(1, lambda: self.probe_connectivity() and False)
         GLib.timeout_add_seconds(OFFLINE_PROBE_SECONDS, self.probe_connectivity)

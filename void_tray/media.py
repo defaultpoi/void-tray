@@ -376,10 +376,11 @@ def download_file(url, dest, progress=None, cancelled=None, block_size=1 << 18, 
     return dest
 
 
-def download_episode(paths, files, progress=None, cancelled=None):
+def download_episode(paths, files, progress=None, cancelled=None, screen=None):
     """Downloads an episode's subtitles (a failing one is skipped) and then its
     video to `paths`; an HLS (.m3u8) video is fetched with ffmpeg, anything else
-    as a file. Each file is asked for with its own `headers`, if it has any.
+    as a file (of the versions it offers, the one that suits `screen`, the size of the
+    screen in pixels). Each file is asked for with its own `headers`, if it has any.
     Returns {'video': path, 'subs': [the subtitle paths saved]}."""
     saved = []
     for sub, path in zip(files['subs'], paths['subs']):
@@ -392,7 +393,7 @@ def download_episode(paths, files, progress=None, cancelled=None):
             pass  # an episode without its subtitles is better than none
     video = files['video']
     if is_hls(video['url']):
-        download_hls(video['url'], paths['video'], headers=video.get('headers'), progress=progress, cancelled=cancelled)
+        download_hls(video['url'], paths['video'], headers=video.get('headers'), progress=progress, cancelled=cancelled, screen=screen)
     else:
         download_file(video['url'], paths['video'], progress=progress, cancelled=cancelled, headers=video.get('headers'))
     return {'video': paths['video'], 'subs': saved}

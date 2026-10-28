@@ -116,7 +116,7 @@ class MediaCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.sources = [(URL, None, None)]
-        self.settings = {'path': self.dir, 'interval': 3600, 'ahead': 2}
+        self.settings = {'path': self.dir, 'interval': 3600, 'ahead': 2, 'screen': None}
         self.idle = []
         for name, value in (('load_media_sources', mock.Mock(side_effect=lambda: list(self.sources))),
                             ('load_media_settings', mock.Mock(side_effect=lambda: dict(self.settings))),
@@ -621,7 +621,7 @@ class TestWatchingWhileItDownloads(MediaCase):
         stub.media['sources'][URL] = entry_with(dict(ep('a', 1), driver='archive'))
         seen = []
 
-        def fake_download(paths, files, progress=None, cancelled=None):
+        def fake_download(paths, files, progress=None, cancelled=None, screen=None):
             seen.append(dict(stub.media_status[(URL, 'a')]))
             progress(10, 100)
             seen.append(dict(stub.media_status[(URL, 'a')]))
@@ -640,6 +640,28 @@ class TestWatchingWhileItDownloads(MediaCase):
                 self.assertEqual(seen[1]['length'], 100)
             else:
                 self.assertNotIn('length', seen[1])
+
+
+class TestMeasuringTheScreen(MediaCase):
+    def test_the_monitor_is_measured_at_the_start_and_again_when_monitors_change(self):
+        stub = Stub()
+        stub._measure_screen = rt.RssTray._measure_screen.__get__(stub)
+        with mock.patch.object(rt, 'primary_monitor_size', side_effect=[(1366, 768), (1920, 1080)]), mock.patch.object(rt, 'remember_screen_size') as remember, \
+                mock.patch.object(rt.Gdk.Screen, 'get_default') as get_screen:
+            stub._measure_screen()
+            remember.assert_called_once_with((1366, 768))
+            handler = get_screen.return_value.connect.call_args
+            self.assertEqual(handler.args[0], 'monitors-changed')
+            handler.args[1](get_screen.return_value)  # a monitor was plugged in
+        self.assertEqual([c.args[0] for c in remember.call_args_list], [(1366, 768), (1920, 1080)])
+
+    def test_without_a_screen_object_nothing_is_connected_and_nothing_breaks(self):
+        stub = Stub()
+        stub._measure_screen = rt.RssTray._measure_screen.__get__(stub)
+        with mock.patch.object(rt, 'primary_monitor_size', return_value=None), mock.patch.object(rt, 'remember_screen_size') as remember, \
+                mock.patch.object(rt.Gdk.Screen, 'get_default', return_value=None):
+            stub._measure_screen()
+        remember.assert_called_once_with(None)
 
 
 class TestPeriodicCheck(MediaCase):
@@ -803,7 +825,7 @@ class TestDownloading(MediaCase):
         saved = {'video': os.path.join(self.dir, 'Show', 'a.mp4'), 'subs': []}
         seen = []
 
-        def download(paths, files, progress=None, cancelled=None):
+        def download(paths, files, progress=None, cancelled=None, screen=None):
             seen.append(dict(stub.media_status[(URL, 'a')]))
             progress(50, 100)
             seen.append(dict(stub.media_status[(URL, 'a')]))
@@ -822,7 +844,7 @@ class TestDownloading(MediaCase):
     def test_progress_is_only_reported_when_the_percent_moves(self):
         stub = self.stub(ep('a', 1))
 
-        def download(paths, files, progress=None, cancelled=None):
+        def download(paths, files, progress=None, cancelled=None, screen=None):
             for done in range(0, 1001, 1):  # a thousand blocks of a hundred percent
                 progress(done, 1000)
             return {'video': 'v', 'subs': []}
@@ -834,13 +856,21 @@ class TestDownloading(MediaCase):
     def test_an_unknown_total_does_not_divide_by_zero(self):
         stub = self.stub(ep('a', 1))
 
-        def download(paths, files, progress=None, cancelled=None):
+        def download(paths, files, progress=None, cancelled=None, screen=None):
             progress(5000, None)
             return {'video': 'v', 'subs': []}
         with mock.patch.object(rt, 'resolve_files', return_value=self.files()), \
                 mock.patch.object(rt, 'download_episode', side_effect=download):
             stub._download_media_episode(URL, 'a')
         self.assertIn('a', stub.media['sources'][URL]['files'])
+
+    def test_the_download_is_told_the_size_of_the_screen(self):
+        stub = self.stub(ep('a', 1))
+        for size in ((1366, 768), None):
+            with mock.patch.object(rt, 'resolve_files', return_value=self.files()), mock.patch.object(rt, 'media_target_size', return_value=size), \
+                    mock.patch.object(rt, 'download_episode', return_value={'video': 'v', 'subs': []}) as fetch:
+                stub._download_media_episode(URL, 'a')
+            self.assertEqual(fetch.call_args.kwargs['screen'], size)
 
     def test_files_go_where_the_settings_say_named_after_the_display_name(self):
         self.sources = [(URL, 'My Show', None)]

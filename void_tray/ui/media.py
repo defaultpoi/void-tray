@@ -5,9 +5,10 @@ import os
 import threading
 import time as time_module
 
-from ..gi_env import GLib, Gio, Gtk, Pango
+from ..gi_env import GLib, Gdk, Gio, Gtk, Pango
 from ..config import load_media_settings, load_media_sources
 from ..constants import CONFIG_FILE
+from ..desktop import primary_monitor_size
 from ..hls import is_hls
 from ..media import (
     clean_title,
@@ -24,6 +25,7 @@ from ..media import (
 from ..mediasources import NoDriver, normalize_files, normalize_saved
 from ..network import run_when_online
 from ..playback import counts_as_watched, play_media_file
+from ..screen import media_target_size, remember_screen_size
 from ..state import new_media_entry, save_media
 
 
@@ -146,6 +148,14 @@ class MediaMixin:
                 save_media(self.media)
         GLib.idle_add(self._on_media_new if new_total else self._refresh_media_rows)
         self._plan_media_downloads()
+
+    def _measure_screen(self):
+        """Remembers the monitor's size for the download threads, which choose how large
+        a video to fetch by it, now and whenever the monitors change."""
+        remember_screen_size(primary_monitor_size())
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            screen.connect('monitors-changed', lambda *_: remember_screen_size(primary_monitor_size()))
 
     def watch_media_config(self):
         """Looks out for changes to config.conf, so that a source added by an editor or
@@ -273,7 +283,7 @@ class MediaMixin:
                 if is_hls(files['video']['url']) and paths['video'].lower().endswith(('.ts', '.mkv')):
                     watchable['part'] = paths['video'] + '.part'
                     self.media_status[key] = {'state': 'downloading', 'percent': max(shown[0], 0), **watchable}
-                saved = download_episode(paths, files, progress=progress)
+                saved = download_episode(paths, files, progress=progress, screen=media_target_size())
         except Exception as error:  # the partial file stays, so the next try carries on
             self.media_status[key] = {'state': 'failed', 'error': describe_media_error(error)}
             GLib.idle_add(self._refresh_media_rows)

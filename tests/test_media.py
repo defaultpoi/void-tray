@@ -635,9 +635,18 @@ class TestDownloads(SiteCase):
         with mock.patch.object(rt, 'download_hls', return_value=paths['video']) as hls, mock.patch.object(rt, 'download_file') as plain:
             saved = rt.download_episode(paths, files, progress=progress, cancelled=cancelled)
         hls.assert_called_once_with('https://cdn.example/a/master.m3u8?t=1', paths['video'], headers={'Referer': 'https://embed.example/'},
-                                    progress=progress, cancelled=cancelled)
+                                    progress=progress, cancelled=cancelled, screen=None)
         plain.assert_not_called()
         self.assertEqual(saved, {'video': paths['video'], 'subs': []})
+
+    def test_the_size_of_the_screen_is_handed_to_the_hls_download(self):
+        paths, files = self.paths_and_files()
+        files['video'] = {'url': 'https://cdn.example/master.m3u8', 'ext': '.mkv'}
+        files['subs'] = []
+        paths['subs'] = []
+        with mock.patch.object(rt, 'download_hls') as hls:
+            rt.download_episode(paths, files, screen=(1366, 768))
+        self.assertEqual(hls.call_args.kwargs['screen'], (1366, 768))
 
     def test_a_plain_file_does_not_go_to_ffmpeg(self):
         self.route('/a.srt', b'x', ctype='text/plain')

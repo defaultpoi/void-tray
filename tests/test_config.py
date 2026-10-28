@@ -539,7 +539,7 @@ class TestMediaConfig(TmpConfigCase):
     def test_defaults_without_a_section(self):
         self.conf('[feeds]\nhttps://example.com/feed.xml\n')
         self.assertEqual(rt.load_media_settings(),
-                         {'path': os.path.expanduser('~/videos'), 'interval': 3600, 'ahead': 2, 'ytdlp': []})
+                         {'path': os.path.expanduser('~/videos'), 'interval': 3600, 'ahead': 2, 'ytdlp': [], 'screen': None})
         self.assertEqual(rt.load_media_sources(), [])
 
     def test_defaults_without_a_config_file(self):
@@ -548,7 +548,7 @@ class TestMediaConfig(TmpConfigCase):
 
     def test_settings_are_read_and_the_path_is_expanded(self):
         self.conf('[media]\npath=~/shows\ninterval=30\nahead=4\n')
-        self.assertEqual(rt.load_media_settings(), {'path': os.path.expanduser('~/shows'), 'interval': 1800, 'ahead': 4, 'ytdlp': []})
+        self.assertEqual(rt.load_media_settings(), {'path': os.path.expanduser('~/shows'), 'interval': 1800, 'ahead': 4, 'ytdlp': [], 'screen': None})
 
     def test_the_interval_has_a_minimum_and_ahead_a_range(self):
         self.conf('[media]\ninterval=1\nahead=500\n')
@@ -603,6 +603,30 @@ class TestMediaConfig(TmpConfigCase):
         self.conf('[media]\nytdlp=-S res:720 --cookies-from-browser firefox --sub-langs "en,ro"\n')
         self.assertEqual(rt.load_media_settings()['ytdlp'],
                          ['-S', 'res:720', '--cookies-from-browser', 'firefox', '--sub-langs', 'en,ro'])
+
+    def test_the_screen_is_width_x_height(self):
+        for text in ('1366x768', '1366 x 768', '1366X768', ' 1920x1080 '):
+            self.conf(f'[media]\nscreen={text}\n')
+            self.assertIsNotNone(rt.load_media_settings()['screen'], text)
+        self.conf('[media]\nscreen=1366x768\n')
+        self.assertEqual(rt.load_media_settings()['screen'], (1366, 768))
+        self.conf('[media]\nscreen = 1920 x 1080  # the tv\n')
+        self.assertEqual(rt.load_media_settings()['screen'], (1920, 1080))
+
+    def test_the_screen_is_the_monitors_own_unless_it_says_a_size(self):
+        for text in ('auto', '', 'big', '1366', '13x7', 'x768', '1366x', '1366x768x2', '-1366x768'):
+            self.conf(f'[media]\nscreen={text}\n')
+            self.assertIsNone(rt.load_media_settings()['screen'], text)
+        self.conf('[media]\nahead=1\n')
+        self.assertIsNone(rt.load_media_settings()['screen'])
+
+    def test_a_screen_line_is_not_a_source(self):
+        self.conf('[media]\nscreen=1366x768\n')
+        self.assertEqual(rt.load_media_sources(), [])
+
+    def test_the_template_documents_the_screen(self):
+        rt.ensure_config()
+        self.assertIn('screen=<width>x<height>', open(rt.CONFIG_FILE).read())
 
     def test_unusable_ytdlp_arguments_are_none(self):
         self.conf('[media]\nytdlp=--x "unclosed\n')

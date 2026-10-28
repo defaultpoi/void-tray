@@ -113,6 +113,8 @@ def ensure_config():
             "# interval=<minutes> between checks (default 60, minimum 10)\n"
             "# ahead=<n> unwatched episodes kept downloaded per source (default 2; 0 downloads\n"
             "# only when you click)\n"
+            "# screen=<width>x<height> the video size to download: the best that fits it, or the\n"
+            "# smallest there is when none does (default: the monitor's own size)\n"
             "# ytdlp=<arguments> added to every yt-dlp run, e.g. -S res:720 --cookies-from-browser firefox\n"
             "# One source per line: url|display name (optional)|order (optional)\n"
             "#   url: an archive.org collection or item (https://archive.org/details/...),\n"
@@ -607,7 +609,7 @@ DEFAULT_MEDIA_CHECK_MINUTES = 60
 MIN_MEDIA_CHECK_MINUTES = 10
 DEFAULT_MEDIA_AHEAD = 2
 MAX_MEDIA_AHEAD = 20
-_MEDIA_SETTINGS = ('path', 'interval', 'ahead', 'ytdlp')
+_MEDIA_SETTINGS = ('path', 'interval', 'ahead', 'ytdlp', 'screen')
 _MEDIA_SOURCE_RE = re.compile(r'[A-Za-z][A-Za-z0-9+.\-_]*:\S')  # https://..., yt-dlp:https://..., mysite:show-1
 
 
@@ -621,7 +623,8 @@ def _media_setting(name):
 
 def load_media_settings():
     """{'path', 'interval' (seconds), 'ahead', 'ytdlp' (extra yt-dlp arguments, a
-    list)} from [media], defaults for anything missing or unusable."""
+    list), 'screen' ((width, height) or None for the monitor's own)} from [media],
+    defaults for anything missing or unusable."""
     path = _media_setting('path') or DEFAULT_MEDIA_PATH
     try:
         minutes = max(MIN_MEDIA_CHECK_MINUTES, int(_media_setting('interval')))
@@ -635,7 +638,9 @@ def load_media_settings():
         ytdlp = shlex.split(_media_setting('ytdlp') or '')
     except ValueError:  # an unclosed quote
         ytdlp = []
-    return {'path': os.path.expanduser(path), 'interval': minutes * 60, 'ahead': ahead, 'ytdlp': ytdlp}
+    size = re.fullmatch(r'(\d{3,5})\s*x\s*(\d{3,5})', (_media_setting('screen') or '').lower())
+    screen = (int(size.group(1)), int(size.group(2))) if size else None
+    return {'path': os.path.expanduser(path), 'interval': minutes * 60, 'ahead': ahead, 'ytdlp': ytdlp, 'screen': screen}
 
 
 def load_media_sources():

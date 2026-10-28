@@ -41,7 +41,8 @@ def is_hls(url):
 
 
 def parse_master(text, base_url):
-    """[{'url', 'bandwidth', 'height'}] for the variants of a master playlist; empty for a media playlist."""
+    """[{'url', 'bandwidth', 'width', 'height'}] for the variants of a master playlist (width and
+    height 0 where it does not say); empty for a media playlist."""
     lines = text.splitlines()
     variants = []
     for number, line in enumerate(lines):
@@ -54,13 +55,30 @@ def parse_master(text, base_url):
         size = re.match(r'(\d+)x(\d+)', attributes.get('RESOLUTION', ''))
         variants.append({'url': urllib.parse.urljoin(base_url, uri),
                          'bandwidth': int(attributes['BANDWIDTH']) if attributes.get('BANDWIDTH', '').isdigit() else 0,
-                         'height': int(size.group(2)) if size else 0})
+                         'width': int(size.group(1)) if size else 0, 'height': int(size.group(2)) if size else 0})
     return variants
 
 
-def best_variant(variants):
-    """The variant to download: the highest bandwidth, then the tallest."""
-    return max(variants, key=lambda v: (v['bandwidth'], v['height']))
+FIT_TOLERANCE = 1.15  # a variant up to this much larger than the screen still counts as fitting it
+
+
+def pick_variant(variants, screen=None):
+    """The variant to download. Without a screen (width, height), or when the variants do
+    not say how large they are, the one with the most bandwidth. Otherwise the best one
+    that fits the screen, measured as a player shows it, scaled to fit: 1440x720 fits
+    1366x768, 1920x1080 does not, and a little more than the screen is fine (see
+    FIT_TOLERANCE). When none fits, the smallest of them, so that a stream whose only
+    version is larger than the screen is still downloaded."""
+    def best(group):
+        return max(group, key=lambda v: (v['bandwidth'], v['height']))
+    sized = [v for v in variants if v['width'] and v['height']]
+    if not screen or not sized:
+        return best(variants)
+
+    def oversize(v):  # how many times larger than the screen it is in the direction that limits it
+        return max(v['width'] / screen[0], v['height'] / screen[1])
+    fitting = [v for v in sized if oversize(v) <= FIT_TOLERANCE]
+    return best(fitting) if fitting else min(sized, key=lambda v: (oversize(v), -v['bandwidth']))
 
 
 def playlist_seconds(text):
@@ -91,9 +109,10 @@ def _ffmpeg_error_text(lines):
     return (useful[-1] if useful else 'ffmpeg failed')[:300]
 
 
-def download_hls(url, dest, headers=None, progress=None, cancelled=None, stall_seconds=None):
+def download_hls(url, dest, headers=None, progress=None, cancelled=None, stall_seconds=None, screen=None):
     """Downloads the HLS stream at `url` to `dest` (.mkv, .ts or .mp4) and returns dest.
-    `headers` are sent with every request (a Referer, a User-Agent). progress(seconds,
+    `headers` are sent with every request (a Referer, a User-Agent). Of the versions a master
+    playlist offers, the one that suits `screen` (width, height) is taken, see pick_variant. progress(seconds,
     total_seconds_or_None) is called as it goes. Raises ValueError for a stream that is
     not finished (live), or when ffmpeg fails or stalls, DownloadCancelled when
     cancelled() turns true. The file is written as dest + '.part' and renamed at the end;
@@ -111,7 +130,7 @@ def download_hls(url, dest, headers=None, progress=None, cancelled=None, stall_s
     text = _fetch_text(url, headers)
     variants = parse_master(text, url)
     if variants:
-        url = best_variant(variants)['url']
+        url = pick_variant(variants, screen)['url']
         text = _fetch_text(url, headers)
     if '#EXT-X-ENDLIST' not in text:
         raise ValueError('this stream is live or not finished yet')
