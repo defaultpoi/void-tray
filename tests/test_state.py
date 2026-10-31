@@ -43,6 +43,61 @@ class TestState(TmpConfigCase):
         self.state_text('[1, 2]')
         self.assertEqual(rt.load_state()['seen'], {})
 
+    def corrupt_copy(self):
+        with open(rt.STATE_FILE + '.corrupt') as f:
+            return f.read()
+
+    def test_a_corrupt_file_is_set_aside_and_not_overwritten_by_the_next_save(self):
+        self.state_text('{"seen": {"a": 1}, "unread": [')  # cut off in the middle
+        state = rt.load_state()
+        self.assertEqual(state['unread'], [])
+        self.assertEqual(self.corrupt_copy(), '{"seen": {"a": 1}, "unread": [')
+        self.assertFalse(os.path.exists(rt.STATE_FILE))
+        rt.save_state(state)  # what the app does a moment later
+        self.assertEqual(self.corrupt_copy(), '{"seen": {"a": 1}, "unread": [')
+        with open(rt.STATE_FILE) as f:
+            self.assertEqual(json.load(f)['unread'], [])
+
+    def test_json_that_is_not_an_object_is_set_aside(self):
+        self.state_text('[1, 2]')
+        self.assertEqual(rt.load_state()['seen'], {})
+        self.assertEqual(self.corrupt_copy(), '[1, 2]')
+        self.assertFalse(os.path.exists(rt.STATE_FILE))
+
+    def test_a_file_that_is_not_text_is_set_aside_instead_of_crashing_the_start(self):
+        with open(rt.STATE_FILE, 'wb') as f:
+            f.write(b'\xff\xfe\x00{')
+        self.assertEqual(rt.load_state()['unread'], [])
+        with open(rt.STATE_FILE + '.corrupt', 'rb') as f:
+            self.assertEqual(f.read(), b'\xff\xfe\x00{')
+
+    def test_a_good_or_missing_file_is_not_set_aside(self):
+        rt.load_state()
+        self.state_text(json.dumps({'unread': [{'id': 'a'}]}))
+        self.assertEqual(rt.load_state()['unread'], [{'id': 'a'}])
+        self.state_text(json.dumps({'seen': [], 'unread': 'x'}))  # wrong-shaped keys are reset one by one
+        rt.load_state()
+        self.assertTrue(os.path.exists(rt.STATE_FILE))
+        self.assertFalse(os.path.exists(rt.STATE_FILE + '.corrupt'))
+
+    def test_a_later_corrupt_file_replaces_the_earlier_copy(self):
+        self.state_text('{first')
+        rt.load_state()
+        self.state_text('{second')
+        rt.load_state()
+        self.assertEqual(self.corrupt_copy(), '{second')
+
+    def test_a_failed_move_still_starts_with_defaults(self):
+        self.state_text('{not json')
+        with mock.patch.object(rt.os, 'replace', side_effect=OSError('read-only')):
+            self.assertEqual(rt.load_state()['unread'], [])
+
+    def test_a_file_that_cannot_be_read_is_not_called_corrupt(self):
+        os.mkdir(rt.STATE_FILE)  # exists, but opening it fails with an OSError
+        self.assertEqual(rt.load_state()['unread'], [])
+        self.assertTrue(os.path.isdir(rt.STATE_FILE))
+        self.assertFalse(os.path.exists(rt.STATE_FILE + '.corrupt'))
+
     def test_wrong_shaped_keys_reset(self):
         self.state_text(json.dumps({
             'seen': [], 'unread': 'x', 'available_updates': {},
@@ -98,6 +153,36 @@ class TestMediaState(TmpConfigCase):
         for text in ('', '{not json', '[1, 2]', 'null', '{"sources": []}'):
             self.write(text)
             self.assertEqual(rt.load_media(), {'sources': {}}, text)
+
+    def test_garbage_is_set_aside_not_overwritten_by_the_next_save(self):
+        for text in ('{"sources": {"https://x.example/f": {"title": "T", "episodes": [', '[1, 2]', '{"sources": []}'):
+            self.write(text)
+            media = rt.load_media()
+            rt.save_media(media)  # the next save, which used to destroy it
+            with open(rt.MEDIA_FILE + '.corrupt') as f:
+                self.assertEqual(f.read(), text)
+            self.assertEqual(rt.load_media(), {'sources': {}})
+
+    def test_a_file_that_is_not_text_is_set_aside_too(self):
+        with open(rt.MEDIA_FILE, 'wb') as f:
+            f.write(b'\xff\xfe\x00{')
+        self.assertEqual(rt.load_media(), {'sources': {}})
+        self.assertTrue(os.path.exists(rt.MEDIA_FILE + '.corrupt'))
+
+    def test_a_missing_empty_or_good_file_is_not_set_aside(self):
+        rt.load_media()
+        self.write({})  # a JSON object with nothing in it holds nothing to lose
+        rt.load_media()
+        self.write({'sources': {'https://x.example/f': {'title': 'T'}}})
+        self.assertEqual(rt.load_media()['sources']['https://x.example/f']['title'], 'T')
+        self.assertFalse(os.path.exists(rt.MEDIA_FILE + '.corrupt'))
+        self.assertTrue(os.path.exists(rt.MEDIA_FILE))
+
+    def test_a_file_that_cannot_be_read_is_left_alone(self):
+        os.mkdir(rt.MEDIA_FILE)
+        self.assertEqual(rt.load_media(), {'sources': {}})
+        self.assertTrue(os.path.isdir(rt.MEDIA_FILE))
+        self.assertFalse(os.path.exists(rt.MEDIA_FILE + '.corrupt'))
 
     def test_what_is_saved_is_loaded(self):
         entry = rt.new_media_entry()

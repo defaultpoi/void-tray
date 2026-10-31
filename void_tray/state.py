@@ -5,10 +5,24 @@ import math
 import os
 
 from .constants import CONFIG_DIR
+from .log import _log
 
 
 STATE_FILE = os.path.join(CONFIG_DIR, 'state.json')
 MEDIA_FILE = os.path.join(CONFIG_DIR, 'media.json')  # kept apart: episode lists are long
+
+
+def _set_aside(path, why):
+    """Moves a data file the app cannot use to `path`.corrupt before the empty
+    default that replaces it is saved over it, so what was in it can still be
+    repaired by hand. One copy is kept: a later corrupt file replaces it."""
+    name = os.path.basename(path)
+    try:
+        os.replace(path, path + '.corrupt')
+    except OSError as e:
+        _log(f'{name} is {why} and could not be set aside: {e}')
+        return
+    _log(f'{name} is {why}; moved to {name}.corrupt and started afresh')
 
 
 def load_state():
@@ -17,10 +31,15 @@ def load_state():
         try:
             with open(STATE_FILE) as f:
                 loaded = json.load(f)
+        except OSError:
+            pass  # unreadable right now, which does not make it corrupt: leave it alone
+        except ValueError:  # not JSON (JSONDecodeError) or not text (UnicodeDecodeError)
+            _set_aside(STATE_FILE, 'not valid JSON')
+        else:
             if isinstance(loaded, dict):
                 state = loaded
-        except (json.JSONDecodeError, OSError):
-            pass
+            else:
+                _set_aside(STATE_FILE, 'not a JSON object')
 
     # Validate shape — a corrupted/hand-edited state.json shouldn't crash
     # the app elsewhere; reset just the offending key to a sane default.
@@ -88,17 +107,23 @@ def new_media_entry():
 
 def load_media():
     """media.json as {'sources': {url: entry}}; a missing or unreadable file
-    starts empty."""
+    starts empty, and a file that is not JSON or not the expected shape is set
+    aside as media.json.corrupt first (see _set_aside)."""
     media = {'sources': {}}
     try:
         with open(MEDIA_FILE) as f:
             loaded = json.load(f)
-    except (OSError, ValueError):
+    except OSError:
+        return media  # the first run has no file; an unreadable one is left alone
+    except ValueError:
+        _set_aside(MEDIA_FILE, 'not valid JSON')
         return media
-    if isinstance(loaded, dict) and isinstance(loaded.get('sources'), dict):
-        for url, entry in loaded['sources'].items():
-            if isinstance(url, str) and isinstance(entry, dict):
-                media['sources'][url] = _clean_media_entry(entry)
+    if not isinstance(loaded, dict) or not isinstance(loaded.get('sources', {}), dict):
+        _set_aside(MEDIA_FILE, 'not the expected shape')
+        return media
+    for url, entry in loaded.get('sources', {}).items():
+        if isinstance(url, str) and isinstance(entry, dict):
+            media['sources'][url] = _clean_media_entry(entry)
     return media
 
 

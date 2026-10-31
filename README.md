@@ -151,6 +151,8 @@ Everything lives in `~/.config/void-tray/`:
 |------|---------|
 | `config.conf` | feeds, mute phrases, Twitch and YouTube channels |
 | `state.json` | read/unread state, the Read later list, timestamps, cached updates and live channels, the end of a running countdown (safe to delete to reset, which also forgets saved items) |
+| `media.json` | the Media section's episode lists, what is watched and what is downloaded |
+| `state.json.corrupt`, `media.json.corrupt` | only if one of the two files above could not be read as JSON when the app started: the app moves it here, starts with an empty one and never writes over this copy (a later corrupt file replaces it). Repair it by hand and rename it back, or delete it |
 | `notification.wav` | sound played on new items and when the timer ends (no sound if the file is absent) |
 
 `config.conf` is INI-like:
