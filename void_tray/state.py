@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import uuid
 
 from .constants import CONFIG_DIR
 from .log import _log
@@ -73,11 +74,26 @@ def load_state():
     return state
 
 
+def _write_json(path, data):
+    """Writes `data` to `path` through a temp file of its own, renamed into
+    place, so a reader never sees a half-written file and two writers (two
+    threads, or a new instance starting while the old one exits) never share
+    a temp file. The temp file is removed if anything fails."""
+    tmp = f'{path}.{uuid.uuid4().hex}.tmp'
+    try:
+        with open(tmp, 'x') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_state(state):
-    tmp = STATE_FILE + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(state, f)
-    os.replace(tmp, STATE_FILE)
+    _write_json(STATE_FILE, state)
 
 
 def _clean_media_entry(entry):
@@ -128,7 +144,4 @@ def load_media():
 
 
 def save_media(media):
-    tmp = MEDIA_FILE + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(media, f)
-    os.replace(tmp, MEDIA_FILE)
+    _write_json(MEDIA_FILE, media)

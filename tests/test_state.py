@@ -7,6 +7,10 @@ from facade import rt
 from helpers import TmpConfigCase
 
 
+def temp_files(directory):
+    return sorted(name for name in os.listdir(directory) if name.endswith('.tmp'))
+
+
 class TestState(TmpConfigCase):
     def test_missing_file_gives_defaults(self):
         s = rt.load_state()
@@ -131,7 +135,60 @@ class TestState(TmpConfigCase):
         rt.save_state({'a': 1})
         with open(rt.STATE_FILE) as f:
             self.assertEqual(json.load(f), {'a': 1})
-        self.assertFalse(os.path.exists(rt.STATE_FILE + '.tmp'))
+        self.assertEqual(temp_files(self.dir), [])
+
+    def test_each_save_uses_a_temp_file_of_its_own(self):
+        renamed = []
+        real_replace = os.replace
+
+        def replace(src, dst):
+            renamed.append(src)
+            real_replace(src, dst)
+        with mock.patch.object(rt.os, 'replace', replace):
+            rt.save_state({'n': 1})
+            rt.save_state({'n': 2})
+        self.assertEqual(len(set(renamed)), 2)
+        self.assertNotIn(rt.STATE_FILE + '.tmp', renamed)
+        self.assertEqual({os.path.dirname(p) for p in renamed}, {self.dir})  # same directory, so the rename is atomic
+
+    def test_two_saves_at_the_same_moment_do_not_share_a_temp_file(self):
+        first_written = rt.threading.Event()
+        release = rt.threading.Event()
+        real_dump = rt.json.dump
+        dumps = []
+
+        def dump(data, f, **kwargs):
+            real_dump(data, f, **kwargs)
+            dumps.append(data)
+            if len(dumps) == 1:  # the first save stops here: written, not yet renamed into place
+                first_written.set()
+                release.wait(5)
+        errors = []
+
+        def first_save():
+            try:
+                rt.save_state({'who': 'first'})
+            except BaseException as e:
+                errors.append(e)
+        with mock.patch.object(rt.json, 'dump', dump):
+            thread = rt.threading.Thread(target=first_save)
+            thread.start()
+            self.assertTrue(first_written.wait(5))
+            rt.save_state({'who': 'second'})
+            release.set()
+            thread.join(5)
+        self.assertEqual(errors, [])
+        with open(rt.STATE_FILE) as f:
+            self.assertEqual(json.load(f), {'who': 'first'})  # the save that finished last wins, whole
+        self.assertEqual(temp_files(self.dir), [])
+
+    def test_a_failed_save_keeps_the_old_file_and_leaves_no_temp_file(self):
+        rt.save_state({'a': 1})
+        with self.assertRaises(TypeError):
+            rt.save_state({'a': object()})  # not serialisable: fails half-way through the write
+        with open(rt.STATE_FILE) as f:
+            self.assertEqual(json.load(f), {'a': 1})
+        self.assertEqual(temp_files(self.dir), [])
 
 
 
@@ -222,6 +279,26 @@ class TestMediaState(TmpConfigCase):
     def test_the_state_file_is_untouched(self):
         rt.save_media({'sources': {}})
         self.assertFalse(os.path.exists(rt.STATE_FILE))
+
+    def test_each_save_uses_a_temp_file_of_its_own(self):
+        renamed = []
+        real_replace = os.replace
+
+        def replace(src, dst):
+            renamed.append(src)
+            real_replace(src, dst)
+        with mock.patch.object(rt.os, 'replace', replace):
+            rt.save_media({'sources': {}})
+            rt.save_media({'sources': {}})
+        self.assertEqual(len(set(renamed)), 2)
+        self.assertNotIn(rt.MEDIA_FILE + '.tmp', renamed)
+
+    def test_a_failed_save_keeps_the_old_file_and_leaves_no_temp_file(self):
+        rt.save_media({'sources': {'https://x.example/f': {'title': 'T'}}})
+        with self.assertRaises(TypeError):
+            rt.save_media({'sources': {'https://x.example/f': object()}})
+        self.assertEqual(rt.load_media()['sources']['https://x.example/f']['title'], 'T')
+        self.assertEqual(temp_files(self.dir), [])
 
 
 if __name__ == '__main__':
