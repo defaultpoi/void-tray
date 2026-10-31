@@ -403,7 +403,7 @@ python3 -m unittest discover -s tests -v   # real PyGObject (needs PyGObject and
 python3 tests/run_stubbed.py               # GTK replaced by mocks; both must pass
 ```
 
-CI runs both on every push. Tests refer to the code through `tests/facade.py`, one namespace over the whole package: reading `rt.name` returns the value from the module that defines it, and `mock.patch.object(rt, 'name', ...)` rebinds it in every module that imported it, so a patch reaches the code under test wherever it lives.
+CI runs both on every push. Tests refer to the code through `tests/facade.py`, one namespace over the whole package: reading `rt.name` returns the value from the module that defines it, and `mock.patch.object(rt, 'name', ...)` rebinds it in every module that imported it, so a patch reaches the code under test wherever it lives. That only works while a name means one thing, so the facade refuses to build when two modules bind the same name to different objects (for example `import datetime` in one and `from datetime import datetime` in another): every test module then fails to import, with the name and the modules in the message. Rename one of them or import both the same way.
 
 ## License
 

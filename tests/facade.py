@@ -12,6 +12,7 @@ import importlib
 import pathlib
 import pkgutil
 import sys
+import types
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -42,6 +43,63 @@ def _imported_names(module):
     return names
 
 
+_PLAIN_DATA = (str, bytes, int, float, bool, tuple, frozenset, type(None))
+
+
+def _same_binding(a, b):
+    """The same object, or two equal plain values (two modules that each define
+    `TIMEOUT = 5` do not disagree about it)."""
+    return a is b or (type(a) is type(b) and isinstance(a, _PLAIN_DATA) and a == b)
+
+
+def _describe(value):
+    if isinstance(value, types.ModuleType):
+        return f'module {value.__name__}'
+    qualname = getattr(value, '__qualname__', None)
+    if not qualname:
+        return type(value).__name__
+    return f'class {qualname}' if isinstance(value, type) else f'{type(value).__name__} {qualname}'
+
+
+def _find_clashes(mods):
+    """{name: [(module, what the name is bound to there), ...]} for every name
+    that two modules bind to different objects.
+
+    The namespace below answers `rt.name` from one module and rebinds `name` in
+    every module that has it, so a name that means two things (an
+    `import datetime` in one module and `from datetime import datetime` in
+    another) silently gives one of them the wrong thing, and tests of unrelated
+    code break or, worse, pass. A package's attribute for its own submodule
+    (`void_tray.live`, put there by the import system) is structural and only
+    counts when something else also uses the name."""
+    regular, structural = {}, {}
+    for module in mods:
+        for name, value in vars(module).items():
+            if name.startswith('__') and name.endswith('__'):
+                continue
+            submodule = isinstance(value, types.ModuleType) and value.__name__ == f'{module.__name__}.{name}'
+            (structural if submodule else regular).setdefault(name, []).append((module.__name__, value))
+    clashes = {}
+    for name, holders in regular.items():
+        everyone = holders + structural.get(name, [])
+        distinct = []
+        for _, value in everyone:
+            if not any(_same_binding(value, kept) for kept in distinct):
+                distinct.append(value)
+        if len(distinct) > 1:
+            clashes[name] = [(module, _describe(value)) for module, value in everyone]
+    return clashes
+
+
+def _clash_message(clashes):
+    lines = ['void_tray modules bind the same name to different things, which the test namespace (rt) cannot '
+             'tell apart: rt.<name> answers from one of them and mock.patch.object(rt, "<name>") rebinds all of '
+             'them, so unrelated tests break or pass for the wrong reason. Rename one, or import both the same way:']
+    for name, where in sorted(clashes.items()):
+        lines.append(f'  {name}: ' + '; '.join(f'{module} = {what}' for module, what in where))
+    return '\n'.join(lines)
+
+
 class _View:
     """What mock.patch sees as the namespace's __dict__, so that it restores
     the original value on exit instead of deleting the attribute."""
@@ -61,6 +119,9 @@ class _Namespace:
 
     def __init__(self):
         mods = _load_modules()
+        clashes = _find_clashes(mods)
+        if clashes:
+            raise RuntimeError(_clash_message(clashes))
         object.__setattr__(self, '_mods', mods)
         object.__setattr__(self, '_borrowed', {m: _imported_names(m) for m in mods})
 
