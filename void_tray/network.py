@@ -4,6 +4,8 @@ import socket
 import threading
 import time as time_module
 
+from .log import _log
+
 
 NETWORK_RETRY_SECONDS = 10  # how often to recheck connectivity if offline at startup
 
@@ -40,22 +42,37 @@ def _tcp_reachable():
     return False
 
 
+_dns_lock = threading.Lock()
+
+
+_dns_lookup = None  # (thread, result) of the lookup in flight, guarded by _dns_lock
+
+
 def _dns_ok(timeout=DNS_TIMEOUT_SECONDS):
     """True if one of PROBE_HOSTNAMES resolves within `timeout` seconds.
     getaddrinfo can't be given a timeout, so it runs on a helper thread that
-    is simply abandoned if the resolver hangs."""
-    result = []
+    is abandoned if the resolver hangs. Only one such thread exists at a time:
+    a probe that finds the previous lookup still stuck waits for that one
+    instead of starting another, so a dead resolver costs one thread rather
+    than one per probe (and probes come from several places every few
+    seconds)."""
+    global _dns_lookup
+    with _dns_lock:
+        if _dns_lookup is None or not _dns_lookup[0].is_alive():
+            result = []
 
-    def lookup():
-        for hostname in PROBE_HOSTNAMES:
-            try:
-                socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-                result.append(True)
-                return
-            except OSError:
-                continue
-    worker = threading.Thread(target=lookup, daemon=True)
-    worker.start()
+            def lookup(found):
+                for hostname in PROBE_HOSTNAMES:
+                    try:
+                        socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+                        found.append(True)
+                        return
+                    except OSError:
+                        continue
+            worker = threading.Thread(target=lookup, args=(result,), daemon=True)
+            _dns_lookup = (worker, result)
+            worker.start()
+        worker, result = _dns_lookup
     worker.join(timeout)
     return bool(result)
 
@@ -118,16 +135,49 @@ def is_online():
     return diagnose_connectivity()['online']
 
 
+_online_lock = threading.Lock()
+
+
+_online_waiting = []  # callbacks waiting for the network, guarded by _online_lock
+
+
+_online_poller_running = False  # a thread is polling for them, guarded by _online_lock
+
+
+def _wait_for_network():
+    """The one poller behind run_when_online: waits until the network is up,
+    then starts every callback that has been added meanwhile on a thread of its
+    own (one slow callback must not hold up the others)."""
+    global _online_poller_running
+    while True:
+        try:
+            if is_online():
+                break
+        except Exception as e:  # one odd probe must not end the wait for everyone
+            _log(f'connectivity probe failed: {type(e).__name__}: {e}')
+        time_module.sleep(NETWORK_RETRY_SECONDS)
+    with _online_lock:
+        callbacks = list(_online_waiting)
+        del _online_waiting[:]
+        _online_poller_running = False
+    for fn in callbacks:
+        threading.Thread(target=fn, daemon=True).start()
+
+
 def run_when_online(fn):
     """Calls fn() on a background thread as soon as the network is up (polling
     every NETWORK_RETRY_SECONDS). is_online() blocks for up to a second per
     probe target, so it must never run on the GTK main loop: while offline
-    that froze the tray for seconds at every retry."""
-    def work():
-        while not is_online():
-            time_module.sleep(NETWORK_RETRY_SECONDS)
-        fn()
-    threading.Thread(target=work, daemon=True).start()
+    that froze the tray for seconds at every retry. Every caller shares one
+    poller: with a thread per caller, five of them probed the network (and
+    could each leave a lookup stuck in a hung resolver) every few seconds."""
+    global _online_poller_running
+    with _online_lock:
+        _online_waiting.append(fn)
+        if _online_poller_running:
+            return
+        _online_poller_running = True
+    threading.Thread(target=_wait_for_network, daemon=True).start()
 
 
 def next_connectivity(online, failures, probe_ok):

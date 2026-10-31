@@ -4,6 +4,15 @@ from unittest import mock
 from facade import rt
 
 
+def wait_until(condition, timeout=5):
+    deadline = rt.time_module.monotonic() + timeout
+    while not condition():
+        if rt.time_module.monotonic() > deadline:
+            return False
+        rt.time_module.sleep(0.01)
+    return True
+
+
 class TestConnectivityState(unittest.TestCase):
     def test_success_is_online_immediately_and_resets_failures(self):
         self.assertEqual(rt.next_connectivity(False, 5, True), (True, 0))
@@ -44,6 +53,61 @@ class TestRunWhenOnline(unittest.TestCase):
                 self.assertFalse(getattr(stub, name)())
         self.assertEqual(run.call_count, 5)
         probe.assert_not_called()  # no blocking network probe on the calling (GTK) thread
+
+
+class TestOnePollerForEveryCaller(unittest.TestCase):
+    def setUp(self):
+        for name, value in (('_online_waiting', []), ('_online_poller_running', False), ('NETWORK_RETRY_SECONDS', 0.01)):
+            patcher = mock.patch.object(rt, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_all_the_waiting_callers_share_one_polling_thread(self):
+        pollers = set()
+        probes = []
+        online = rt.threading.Event()
+
+        def probe():
+            pollers.add(rt.threading.get_ident())
+            probes.append(1)
+            return online.is_set()
+        ran = []
+        with mock.patch.object(rt, 'is_online', probe):
+            for i in range(5):
+                rt.run_when_online(lambda i=i: ran.append(i))
+            self.assertTrue(wait_until(lambda: len(probes) >= 5))  # five polls while offline
+            self.assertEqual(ran, [])
+            online.set()
+            self.assertTrue(wait_until(lambda: len(ran) == 5))
+        self.assertEqual(len(pollers), 1)  # one thread did all the probing (it was one per caller)
+        self.assertEqual(sorted(ran), [0, 1, 2, 3, 4])  # and every caller was served, once
+
+    def test_a_callback_that_blocks_does_not_hold_up_the_others(self):
+        block = rt.threading.Event()
+        self.addCleanup(block.set)
+        other = rt.threading.Event()
+        with mock.patch.object(rt, 'is_online', return_value=True):
+            rt.run_when_online(lambda: block.wait(10))
+            rt.run_when_online(other.set)
+            self.assertTrue(other.wait(5))
+
+    def test_a_caller_after_the_network_came_back_is_served_by_a_new_wait(self):
+        first, second = rt.threading.Event(), rt.threading.Event()
+        with mock.patch.object(rt, 'is_online', return_value=True):
+            rt.run_when_online(first.set)
+            self.assertTrue(first.wait(5))
+            rt.run_when_online(second.set)
+            self.assertTrue(second.wait(5))
+
+    def test_a_probe_that_raises_does_not_end_the_wait_for_everyone(self):
+        done = rt.threading.Event()
+        with mock.patch.object(rt, 'is_online', side_effect=[RuntimeError('odd'), False, True]):
+            rt.run_when_online(done.set)
+            self.assertTrue(done.wait(5))
+        again = rt.threading.Event()
+        with mock.patch.object(rt, 'is_online', return_value=True):
+            rt.run_when_online(again.set)  # the shared wait is not left stuck as "running"
+            self.assertTrue(again.wait(5))
 
 
 class TestConnectivityDiagnosis(unittest.TestCase):
@@ -90,6 +154,11 @@ class TestConnectivityDiagnosis(unittest.TestCase):
 
 
 class TestConnectivityProbes(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(rt, '_dns_lookup', None)  # no lookup left in flight by an earlier test
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     ROUTE = ('Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n'
              'wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\n'
              'wlan0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\n')
@@ -119,6 +188,53 @@ class TestConnectivityProbes(unittest.TestCase):
             started = rt.time_module.monotonic()
             self.assertFalse(rt._dns_ok(timeout=0.2))
         self.assertLess(rt.time_module.monotonic() - started, 2)
+
+    def test_a_stuck_resolver_costs_one_lookup_thread_not_one_per_probe(self):
+        release = rt.threading.Event()
+        self.addCleanup(release.set)
+        lookups = []
+
+        def stuck(*args, **kwargs):
+            lookups.append(rt.threading.get_ident())
+            release.wait(10)
+        with mock.patch.object(rt.socket, 'getaddrinfo', side_effect=stuck):
+            answers = [rt._dns_ok(timeout=0.05) for _ in range(5)]
+        self.assertEqual(answers, [False] * 5)
+        self.assertEqual(len(lookups), 1)
+
+    def test_a_probe_that_finds_a_lookup_in_flight_waits_for_that_one(self):
+        release = rt.threading.Event()
+        self.addCleanup(release.set)
+        lookups = []
+
+        def slow(*args, **kwargs):
+            lookups.append(1)
+            release.wait(10)
+            return [('x',)]
+        with mock.patch.object(rt.socket, 'getaddrinfo', side_effect=slow):
+            self.assertFalse(rt._dns_ok(timeout=0.05))  # the resolver is slow: still waiting after 50 ms
+            timer = rt.threading.Timer(0.5, release.set)
+            self.addCleanup(timer.cancel)
+            timer.start()
+            self.assertTrue(rt._dns_ok(timeout=5))  # joins that lookup and sees it finish
+        self.assertEqual(len(lookups), 1)
+
+    def test_once_the_stuck_lookup_has_ended_the_next_probe_looks_again(self):
+        release = rt.threading.Event()
+        self.addCleanup(release.set)
+        calls = []
+
+        def getaddrinfo(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                release.wait(10)
+                raise OSError('timed out')
+            return [('x',)]
+        with mock.patch.object(rt.socket, 'getaddrinfo', side_effect=getaddrinfo):
+            self.assertFalse(rt._dns_ok(timeout=0.05))
+            release.set()
+            rt._dns_lookup[0].join(5)  # the stuck lookup gives up (every hostname fails)
+            self.assertTrue(rt._dns_ok(timeout=5))  # a new probe is a new lookup, not the old failure
 
     def test_gateway_that_refuses_connections_is_alive(self):
         with mock.patch.object(rt.socket, 'create_connection', side_effect=ConnectionRefusedError()):
